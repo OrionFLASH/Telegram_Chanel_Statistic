@@ -50,6 +50,34 @@ def load_scan_concurrency(default_value: int = 16) -> int:
     concurrency_raw = os.getenv("TELEGRAM_CONCURRENCY", "").strip()
     if not concurrency_raw:
         return default_value
+
+
+def load_request_timeout(default_value: int = 60) -> int:
+    """
+    Загружает таймаут запросов из переменных окружения.
+    
+    Args:
+        default_value: Значение по умолчанию в секундах
+    
+    Returns:
+        Таймаут запросов в секундах
+    """
+    logger = setup_logger("main")
+    timeout_raw = os.getenv("TELEGRAM_REQUEST_TIMEOUT", "").strip()
+    if not timeout_raw:
+        return default_value
+    try:
+        timeout_value = int(timeout_raw)
+        if timeout_value <= 0:
+            raise ValueError("Таймаут должен быть положительным числом")
+        return timeout_value
+    except ValueError as exc:
+        logger.warning(
+            f"Некорректное значение TELEGRAM_REQUEST_TIMEOUT '{timeout_raw}', "
+            f"используется значение по умолчанию {default_value}"
+        )
+        logger.debug(f"Детали ошибки при разборе TELEGRAM_REQUEST_TIMEOUT: {exc}")
+        return default_value
     try:
         concurrency_value = int(concurrency_raw)
         if concurrency_value <= 0:
@@ -164,7 +192,9 @@ async def main() -> None:
         # Создаем сканер каналов
         logger.info("Инициализация сканера каналов")
         concurrency = load_scan_concurrency()
+        request_timeout = load_request_timeout()
         logger.info(f"Параллелизм сканирования: {concurrency}")
+        logger.info(f"Таймаут запроса: {request_timeout} сек")
         unsubscribe_ids = load_unsubscribe_ids()
         if unsubscribe_ids:
             logger.info(f"Активна авто-отписка, ID в списке: {len(unsubscribe_ids)}")
@@ -172,12 +202,15 @@ async def main() -> None:
             client,
             concurrency=concurrency,
             unsubscribe_ids=unsubscribe_ids,
+            request_timeout=float(request_timeout),
         )
         
         # Выполняем сканирование
         logger.info("Начало процесса сканирования")
         channels_data = await scanner.scan_all_channels()
-        await scanner.scan_private_chats()
+        logger.info("Сканирование каналов завершено, старт сканирования личных чатов")
+        private_chats_data = await scanner.scan_private_chats()
+        logger.info(f"Сканирование личных чатов завершено: {len(private_chats_data)}")
         
         # Сохраняем результаты
         logger.info("Сохранение результатов сканирования")

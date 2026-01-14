@@ -8,12 +8,11 @@
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from time import monotonic
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
+import xlsxwriter
 from telethon import TelegramClient
 from telethon.tl import functions
 from telethon.errors import ChatAdminRequiredError, FloodWaitError
@@ -36,6 +35,7 @@ class ChannelScanner:
         concurrency: int = 16,
         request_delay: float = 0.2,
         unsubscribe_ids: Optional[Set[int]] = None,
+        request_timeout: float = 60.0,
     ) -> None:
         """
         Инициализация сканера каналов.
@@ -45,6 +45,7 @@ class ChannelScanner:
             concurrency: Максимальное количество одновременных запросов
             request_delay: Небольшая задержка между запросами для снижения нагрузки
             unsubscribe_ids: Набор ID каналов/групп для авто-отписки
+            request_timeout: Таймаут запроса в секундах для долгих операций
         """
         self.client = client
         self.logger = get_logger("channel_scanner")
@@ -55,6 +56,54 @@ class ChannelScanner:
         self.output_dir = Path(__file__).parent.parent / "OUT"
         self.output_dir.mkdir(exist_ok=True)
         self.unsubscribe_ids = unsubscribe_ids or set()
+        self.request_timeout = max(1.0, request_timeout)
+
+    def _build_basic_channel_info(
+        self,
+        entity: Channel,
+        last_message_date: Optional[str],
+        status: str,
+    ) -> Dict[str, Any]:
+        """
+        Создает базовую запись о канале для случаев таймаута/ошибки.
+        
+        Args:
+            entity: Сущность канала/группы
+            last_message_date: Дата последнего сообщения
+            status: Статус обработки
+        
+        Returns:
+            Базовый словарь с данными канала
+        """
+        is_public = entity.username is not None
+        if entity.username:
+            link = f"https://t.me/{entity.username}"
+        else:
+            link = f"tg://resolve?domain={entity.id}"
+        return {
+            "id": entity.id,
+            "title": entity.title or "Без названия",
+            "username": entity.username or "Нет username",
+            "is_broadcast": entity.broadcast,
+            "is_megagroup": entity.megagroup,
+            "is_gigagroup": getattr(entity, "gigagroup", False),
+            "access_hash": str(entity.access_hash) if hasattr(entity, "access_hash") else None,
+            "scanned_at": datetime.now().isoformat(),
+            "participants_count": None,
+            "about": "Нет описания",
+            "created_date": None,
+            "is_public": is_public,
+            "link": link,
+            "linked_chat_id": None,
+            "linked_chat_title": None,
+            "linked_chat_username": None,
+            "linked_chat_link": None,
+            "forum_topics": [],
+            "forum_topics_count": 0,
+            "last_message_date": last_message_date,
+            "unsubscribed_status": "Нет",
+            "processing_status": status,
+        }
 
     def _format_participants_count(self, participants_count: Any) -> str:
         """
@@ -248,7 +297,8 @@ class ChannelScanner:
                 "is_megagroup": entity.megagroup,  # True для супергрупп
                 "is_gigagroup": getattr(entity, 'gigagroup', False),
                 "access_hash": str(entity.access_hash) if hasattr(entity, 'access_hash') else None,
-                "scanned_at": datetime.now().isoformat()
+                "scanned_at": datetime.now().isoformat(),
+                "processing_status": "Ок",
             }
             
             # Пытаемся получить полную информацию для расширенных данных
@@ -410,10 +460,30 @@ class ChannelScanner:
                     self.logger.info(
                         f"Обработка канала {index}/{len(channels_and_groups)}: {entity.title}"
                     )
-                    channel_info = await self.get_channel_info(
-                        entity,
-                        last_message_date=last_message_map.get(entity.id),
-                    )
+                    start_time = monotonic()
+                    try:
+                        channel_info = await asyncio.wait_for(
+                            self.get_channel_info(
+                                entity,
+                                last_message_date=last_message_map.get(entity.id),
+                            ),
+                            timeout=self.request_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        self.logger.warning(
+                            f"Таймаут обработки канала {entity.id} "
+                            f"(>{self.request_timeout:.0f} сек)"
+                        )
+                        channel_info = self._build_basic_channel_info(
+                            entity,
+                            last_message_date=last_message_map.get(entity.id),
+                            status="Таймаут",
+                        )
+                    duration = monotonic() - start_time
+                    if duration > 10:
+                        self.logger.warning(
+                            f"Долгая обработка канала {entity.id}: {duration:.1f} сек"
+                        )
                     if channel_info:
                         participants_text = self._format_participants_count(
                             channel_info.get("participants_count")
@@ -434,6 +504,12 @@ class ChannelScanner:
                                 channel_info["unsubscribed_status"] = "Ошибка отписки"
                         else:
                             channel_info["unsubscribed_status"] = "Нет"
+                    else:
+                        channel_info = self._build_basic_channel_info(
+                            entity,
+                            last_message_date=last_message_map.get(entity.id),
+                            status="Ошибка",
+                        )
                     # Небольшая задержка между запросами
                     if self.request_delay:
                         await asyncio.sleep(self.request_delay)
@@ -540,6 +616,7 @@ class ChannelScanner:
             "Связанный канал",
             "Связанный канал ссылка",
             "Удален по списку",
+            "Статус обработки",
             "Темы форума (кол-во)",
             "Темы форума",
             "Дата создания",
@@ -586,6 +663,7 @@ class ChannelScanner:
                     str(channel.get("linked_chat_title", "")) if channel.get("linked_chat_title") else "",
                     str(channel.get("linked_chat_link", "")) if channel.get("linked_chat_link") else "",
                     str(channel.get("unsubscribed_status", "")),
+                    str(channel.get("processing_status", "")),
                     int(channel.get("forum_topics_count", 0) or 0),
                     forum_topics_text,
                     str(channel.get("created_date", "")) if channel.get("created_date") else "",
@@ -612,75 +690,86 @@ class ChannelScanner:
             return int(participants_value)
         return 0
 
-    def _apply_xlsx_styles(
+    def _write_xlsx_sheet(
         self,
-        worksheet,
+        workbook: "xlsxwriter.Workbook",
+        sheet_name: str,
         headers: List[str],
         rows: List[List[Any]],
         numeric_formats: Optional[Dict[str, str]] = None,
     ) -> None:
         """
-        Применяет форматирование к листу XLSX для удобного просмотра.
+        Записывает данные и оформление листа XLSX.
         
         Args:
-            worksheet: Лист Excel
-            headers: Список заголовков
-            rows: Строки данных
-            numeric_formats: Форматы для числовых колонок по названию
+            workbook: Экземпляр Workbook
+            sheet_name: Имя листа
+            headers: Заголовки таблицы
+            rows: Данные строк
+            numeric_formats: Форматы числовых колонок по названию
         """
-        header_font = Font(bold=True, color="FFFFFF")
-        header_fill = PatternFill(start_color="2F75B5", end_color="2F75B5", fill_type="solid")
-        data_alignment = Alignment(vertical="top", wrap_text=True)
-        numeric_alignment = Alignment(horizontal="right", vertical="top")
-        thin_border = Border(
-            left=Side(style="thin", color="D9D9D9"),
-            right=Side(style="thin", color="D9D9D9"),
-            top=Side(style="thin", color="D9D9D9"),
-            bottom=Side(style="thin", color="D9D9D9"),
+        worksheet = workbook.add_worksheet(sheet_name)
+        header_format = workbook.add_format(
+            {
+                "bold": True,
+                "font_color": "#FFFFFF",
+                "bg_color": "#2F75B5",
+                "align": "center",
+                "valign": "vcenter",
+                "border": 1,
+            }
         )
-        zebra_fill = PatternFill(start_color="F3F6FA", end_color="F3F6FA", fill_type="solid")
-
-        for col_idx, header in enumerate(headers, 1):
-            cell = worksheet.cell(row=1, column=col_idx, value=header)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            cell.border = thin_border
-
+        data_format = workbook.add_format({"text_wrap": True, "valign": "top", "border": 1})
+        zebra_format = workbook.add_format(
+            {"text_wrap": True, "valign": "top", "border": 1, "bg_color": "#F3F6FA"}
+        )
         numeric_formats = numeric_formats or {}
-        numeric_cols = {
-            headers.index(name) + 1: fmt
+        numeric_format_map: Dict[int, str] = {
+            headers.index(name): fmt
             for name, fmt in numeric_formats.items()
             if name in headers
         }
-        for row_idx, row in enumerate(rows, start=2):
+        numeric_format_cache: Dict[Tuple[str, bool], Any] = {}
+
+        for col_idx, header in enumerate(headers):
+            worksheet.write(0, col_idx, header, header_format)
+
+        for row_idx, row in enumerate(rows, start=1):
             is_zebra = row_idx % 2 == 0
-            for col_idx, value in enumerate(row, 1):
-                cell = worksheet.cell(row=row_idx, column=col_idx, value=value)
-                if col_idx in numeric_cols:
-                    cell.alignment = numeric_alignment
-                    if isinstance(value, (int, float)):
-                        cell.number_format = numeric_cols[col_idx]
-                else:
-                    cell.alignment = data_alignment
-                cell.border = thin_border
-                if is_zebra:
-                    cell.fill = zebra_fill
+            for col_idx, value in enumerate(row):
+                fmt = zebra_format if is_zebra else data_format
+                if col_idx in numeric_format_map and isinstance(value, (int, float)):
+                    format_key = (numeric_format_map[col_idx], is_zebra)
+                    if format_key not in numeric_format_cache:
+                        format_payload = {
+                            "align": "right",
+                            "valign": "top",
+                            "border": 1,
+                            "num_format": numeric_format_map[col_idx],
+                        }
+                        if is_zebra:
+                            format_payload["bg_color"] = "#F3F6FA"
+                        numeric_format_cache[format_key] = workbook.add_format(format_payload)
+                    fmt = numeric_format_cache[format_key]
+                worksheet.write(row_idx, col_idx, value, fmt)
 
-        worksheet.freeze_panes = "A2"
-        worksheet.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(rows) + 1}"
+        worksheet.freeze_panes(1, 0)
+        if rows:
+            worksheet.autofilter(0, 0, len(rows), len(headers) - 1)
+        else:
+            worksheet.autofilter(0, 0, 0, len(headers) - 1)
 
-        for col_idx, header in enumerate(headers, 1):
+        for col_idx, header in enumerate(headers):
             if header == "Темы форума":
-                worksheet.column_dimensions[get_column_letter(col_idx)].width = 80
+                worksheet.set_column(col_idx, col_idx, 80)
                 continue
             max_len = len(header)
             for row in rows:
-                value = row[col_idx - 1]
+                value = row[col_idx]
                 if value:
                     max_len = max(max_len, len(str(value)))
             adjusted = min(max(max_len + 2, 12), 60)
-            worksheet.column_dimensions[get_column_letter(col_idx)].width = adjusted
+            worksheet.set_column(col_idx, col_idx, adjusted)
 
     def save_to_xlsx(self, filename: str = "channels_data.xlsx") -> None:
         """
@@ -692,17 +781,12 @@ class ChannelScanner:
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M")
             output_path = self.output_dir / self._append_timestamp(filename, timestamp)
-            workbook = Workbook()
-            worksheet = workbook.active
-            worksheet.title = "Каналы"
+            workbook = xlsxwriter.Workbook(str(output_path))
 
             headers, rows = self._build_xlsx_rows()
-            worksheet.append(headers)
-            for row in rows:
-                worksheet.append(row)
-
-            self._apply_xlsx_styles(
-                worksheet,
+            self._write_xlsx_sheet(
+                workbook,
+                "Каналы",
                 headers,
                 rows,
                 numeric_formats={
@@ -712,12 +796,9 @@ class ChannelScanner:
             )
 
             private_headers, private_rows = self._build_private_xlsx_rows()
-            private_sheet = workbook.create_sheet(title="Личные чаты")
-            private_sheet.append(private_headers)
-            for row in private_rows:
-                private_sheet.append(row)
-            self._apply_xlsx_styles(
-                private_sheet,
+            self._write_xlsx_sheet(
+                workbook,
+                "Личные чаты",
                 private_headers,
                 private_rows,
                 numeric_formats={
@@ -731,7 +812,7 @@ class ChannelScanner:
                     "Сообщений от собеседника": "#,##0",
                 },
             )
-            workbook.save(output_path)
+            workbook.close()
             self.logger.info(f"XLSX отчет сохранен в файл: {output_path}")
         except Exception as e:
             self.logger.error(f"Ошибка при сохранении XLSX файла: {e}")
@@ -778,6 +859,7 @@ class ChannelScanner:
                     last_message_map[entity.id] = message_date
 
             self.logger.info(f"Найдено личных чатов: {len(private_dialogs)}")
+            self.logger.info("Старт параллельной обработки личных чатов")
             semaphore = asyncio.Semaphore(self.concurrency)
 
             async def process_private_chat(index: int, entity: User) -> Optional[Dict[str, Any]]:
@@ -796,10 +878,30 @@ class ChannelScanner:
                         f"Обработка личного чата {index}/{len(private_dialogs)}: "
                         f"{getattr(entity, 'first_name', '')} {getattr(entity, 'last_name', '')}".strip()
                     )
-                    chat_info = await self._collect_private_chat_info(
-                        entity,
-                        last_message_map.get(entity.id),
-                    )
+                    start_time = monotonic()
+                    try:
+                        chat_info = await asyncio.wait_for(
+                            self._collect_private_chat_info(
+                                entity,
+                                last_message_map.get(entity.id),
+                            ),
+                            timeout=self.request_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        self.logger.warning(
+                            f"Таймаут обработки личного чата {entity.id} "
+                            f"(>{self.request_timeout:.0f} сек)"
+                        )
+                        chat_info = self._build_basic_private_chat_info(
+                            entity,
+                            last_message_map.get(entity.id),
+                            status="Таймаут",
+                        )
+                    duration = monotonic() - start_time
+                    if duration > 10:
+                        self.logger.warning(
+                            f"Долгая обработка личного чата {entity.id}: {duration:.1f} сек"
+                        )
                     if self.request_delay:
                         await asyncio.sleep(self.request_delay)
                     return chat_info
@@ -809,11 +911,20 @@ class ChannelScanner:
                 for index, entity in enumerate(private_dialogs, 1)
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
+            completed = 0
             for result in results:
                 if isinstance(result, dict):
                     self.private_chats_data.append(result)
+                    completed += 1
+                    if completed % 5 == 0:
+                        self.logger.info(
+                            f"Прогресс личных чатов: {completed}/{len(private_dialogs)}"
+                        )
                 elif isinstance(result, Exception):
                     self.logger.error(f"Ошибка при обработке личного чата: {result}")
+            self.logger.info(
+                f"Обработка личных чатов завершена: {len(self.private_chats_data)}"
+            )
             return self.private_chats_data
         except Exception as e:
             self.logger.error(f"Критическая ошибка при сканировании личных чатов: {e}")
@@ -847,6 +958,7 @@ class ChannelScanner:
             messages_from_me = 0
             messages_from_other = 0
 
+            last_progress = monotonic()
             async for message in self.client.iter_messages(entity):
                 if not getattr(message, "date", None):
                     continue
@@ -860,6 +972,13 @@ class ChannelScanner:
                     messages_year += 1
                 if message_date >= threshold_90:
                     messages_90 += 1
+                if messages_total % 2000 == 0:
+                    elapsed = monotonic() - last_progress
+                    last_progress = monotonic()
+                    self.logger.debug(
+                        f"Личный чат {entity.id}: обработано {messages_total} сообщений "
+                        f"(за {elapsed:.1f} сек)"
+                    )
 
             average_per_day = round(messages_90 / 90, 2)
             average_per_week = round(messages_90 / (90 / 7), 2)
@@ -880,6 +999,7 @@ class ChannelScanner:
                 "messages_total": messages_total,
                 "messages_from_me": messages_from_me,
                 "messages_from_other": messages_from_other,
+                "processing_status": "Ок",
             }
         except Exception as e:
             self.logger.error(f"Ошибка при сборе данных личного чата {entity.id}: {e}")
@@ -907,9 +1027,15 @@ class ChannelScanner:
             "Сообщений всего",
             "Сообщений от вас",
             "Сообщений от собеседника",
+            "Статус обработки",
         ]
         rows: List[List[Any]] = []
-        for chat in self.private_chats_data:
+        sorted_chats = sorted(
+            self.private_chats_data,
+            key=lambda item: int(item.get("messages_total", 0) or 0),
+            reverse=True,
+        )
+        for chat in sorted_chats:
             rows.append(
                 [
                     str(chat.get("id", "")),
@@ -926,6 +1052,45 @@ class ChannelScanner:
                     int(chat.get("messages_total", 0)),
                     int(chat.get("messages_from_me", 0)),
                     int(chat.get("messages_from_other", 0)),
+                    str(chat.get("processing_status", "")),
                 ]
             )
         return headers, rows
+
+    def _build_basic_private_chat_info(
+        self,
+        entity: User,
+        last_message_date: Optional[str],
+        status: str,
+    ) -> Dict[str, Any]:
+        """
+        Создает базовую запись о личном чате при таймауте/ошибке.
+        
+        Args:
+            entity: Пользователь
+            last_message_date: Дата последнего сообщения
+            status: Статус обработки
+        
+        Returns:
+            Базовый словарь данных личного чата
+        """
+        display_name = " ".join(
+            part for part in [getattr(entity, "first_name", ""), getattr(entity, "last_name", "")] if part
+        ).strip() or "Без имени"
+        return {
+            "id": entity.id,
+            "name": display_name,
+            "username": getattr(entity, "username", None),
+            "phone": getattr(entity, "phone", None),
+            "participants": f"Вы; {display_name}",
+            "last_message_date": last_message_date,
+            "messages_90": 0,
+            "avg_day": 0.0,
+            "avg_week": 0.0,
+            "avg_month": 0.0,
+            "messages_year": 0,
+            "messages_total": 0,
+            "messages_from_me": 0,
+            "messages_from_other": 0,
+            "processing_status": status,
+        }
