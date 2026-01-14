@@ -9,7 +9,7 @@ import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -30,7 +30,13 @@ class ChannelScanner:
     в которых пользователь является участником, с детальной информацией.
     """
     
-    def __init__(self, client: TelegramClient, concurrency: int = 16, request_delay: float = 0.2) -> None:
+    def __init__(
+        self,
+        client: TelegramClient,
+        concurrency: int = 16,
+        request_delay: float = 0.2,
+        unsubscribe_ids: Optional[Set[int]] = None,
+    ) -> None:
         """
         Инициализация сканера каналов.
         
@@ -38,6 +44,7 @@ class ChannelScanner:
             client: Экземпляр TelegramClient для работы с API
             concurrency: Максимальное количество одновременных запросов
             request_delay: Небольшая задержка между запросами для снижения нагрузки
+            unsubscribe_ids: Набор ID каналов/групп для авто-отписки
         """
         self.client = client
         self.logger = get_logger("channel_scanner")
@@ -46,6 +53,7 @@ class ChannelScanner:
         self.request_delay = max(0.0, request_delay)
         self.output_dir = Path(__file__).parent.parent / "OUT"
         self.output_dir.mkdir(exist_ok=True)
+        self.unsubscribe_ids = unsubscribe_ids or set()
 
     def _format_participants_count(self, participants_count: Any) -> str:
         """
@@ -87,6 +95,21 @@ class ChannelScanner:
         except Exception as e:
             self.logger.debug(f"Ошибка при получении количества участников через Full* методы: {e}")
         return None
+
+    async def _leave_channel_or_chat(self, entity: Channel) -> None:
+        """
+        Выполняет отписку от канала или выход из группы.
+        
+        Args:
+            entity: Сущность канала/группы
+        """
+        try:
+            if isinstance(entity, Channel):
+                await self.client(functions.channels.LeaveChannelRequest(channel=entity))
+            elif isinstance(entity, Chat):
+                await self.client(functions.messages.DeleteChatUser(chat_id=entity.id, user_id="me"))
+        except Exception as e:
+            self.logger.error(f"Ошибка при попытке отписки от {entity.id}: {e}")
 
     async def get_channel_info(self, entity: Channel) -> Optional[Dict[str, Any]]:
         """
@@ -223,6 +246,12 @@ class ChannelScanner:
                             f"Канал обработан: {channel_info.get('title', '')} "
                             f"(подписчиков: {participants_text})"
                         )
+                        if channel_info.get("id") in self.unsubscribe_ids:
+                            self.logger.info(
+                                f"Отписка по списку: {channel_info.get('title', '')} "
+                                f"(id: {channel_info.get('id')})"
+                            )
+                            await self._leave_channel_or_chat(entity)
                     # Небольшая задержка между запросами
                     if self.request_delay:
                         await asyncio.sleep(self.request_delay)

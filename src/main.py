@@ -64,6 +64,32 @@ def load_scan_concurrency(default_value: int = 16) -> int:
         return default_value
 
 
+def load_unsubscribe_ids() -> set:
+    """
+    Загружает список ID каналов/групп для авто-отписки из .env.
+    
+    Returns:
+        Набор ID каналов/групп для отписки
+    """
+    logger = setup_logger("main")
+    raw_value = os.getenv("TELEGRAM_UNSUBSCRIBE_IDS", "").strip()
+    if not raw_value:
+        return set()
+    ids: set = set()
+    for item in raw_value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            ids.add(int(item))
+        except ValueError as exc:
+            logger.warning(
+                f"Некорректный ID в TELEGRAM_UNSUBSCRIBE_IDS: '{item}', пропуск"
+            )
+            logger.debug(f"Детали ошибки разбора ID: {exc}")
+    return ids
+
+
 async def authenticate_client(client: TelegramClient, phone: str) -> None:
     """
     Выполняет аутентификацию клиента Telegram.
@@ -139,7 +165,14 @@ async def main() -> None:
         logger.info("Инициализация сканера каналов")
         concurrency = load_scan_concurrency()
         logger.info(f"Параллелизм сканирования: {concurrency}")
-        scanner = ChannelScanner(client, concurrency=concurrency)
+        unsubscribe_ids = load_unsubscribe_ids()
+        if unsubscribe_ids:
+            logger.info(f"Активна авто-отписка, ID в списке: {len(unsubscribe_ids)}")
+        scanner = ChannelScanner(
+            client,
+            concurrency=concurrency,
+            unsubscribe_ids=unsubscribe_ids,
+        )
         
         # Выполняем сканирование
         logger.info("Начало процесса сканирования")

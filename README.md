@@ -236,9 +236,11 @@ pip install -r requirements.txt
    TELEGRAM_API_HASH=ваш_api_hash
    TELEGRAM_PHONE=+79991234567
    TELEGRAM_CONCURRENCY=16
+   TELEGRAM_UNSUBSCRIBE_IDS=1088792240
    ```
    - Номер телефона указывайте в международном формате, как в Telegram
    - `TELEGRAM_CONCURRENCY` задает количество одновременных задач сканирования
+   - `TELEGRAM_UNSUBSCRIBE_IDS` — список ID каналов/групп для авто-отписки (через запятую)
 
 ## Использование программы
 
