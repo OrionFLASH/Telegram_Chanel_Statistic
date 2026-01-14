@@ -328,7 +328,7 @@ class ChannelScanner:
             "Дата создания",
             "Дата сканирования",
         ]
-        rows: List[List[str]] = []
+        rows: List[List[Any]] = []
         for channel in self.channels_data:
             if channel.get("is_broadcast"):
                 channel_type = "Канал"
@@ -339,10 +339,14 @@ class ChannelScanner:
             else:
                 channel_type = "Группа"
             participants_value = channel.get("participants_count")
-            if participants_value is None:
-                participants_text = "Неизвестно"
+            if isinstance(participants_value, int):
+                participants_cell: Any = participants_value
+            elif isinstance(participants_value, str) and participants_value.isdigit():
+                participants_cell = int(participants_value)
+            elif participants_value is None:
+                participants_cell = "Неизвестно"
             else:
-                participants_text = str(participants_value)
+                participants_cell = str(participants_value)
             rows.append(
                 [
                     str(channel.get("id", "")),
@@ -350,7 +354,7 @@ class ChannelScanner:
                     str(channel.get("username", "")),
                     channel_type,
                     "Да" if channel.get("is_public") else "Нет",
-                    participants_text,
+                    participants_cell,
                     str(channel.get("about", "")),
                     str(channel.get("link", "")),
                     str(channel.get("created_date", "")) if channel.get("created_date") else "",
@@ -371,6 +375,7 @@ class ChannelScanner:
         header_font = Font(bold=True, color="FFFFFF")
         header_fill = PatternFill(start_color="2F75B5", end_color="2F75B5", fill_type="solid")
         data_alignment = Alignment(vertical="top", wrap_text=True)
+        numeric_alignment = Alignment(horizontal="right", vertical="top")
         thin_border = Border(
             left=Side(style="thin", color="D9D9D9"),
             right=Side(style="thin", color="D9D9D9"),
@@ -386,11 +391,17 @@ class ChannelScanner:
             cell.alignment = Alignment(horizontal="center", vertical="center")
             cell.border = thin_border
 
+        participants_col_idx = headers.index("Участников") + 1
         for row_idx, row in enumerate(rows, start=2):
             is_zebra = row_idx % 2 == 0
             for col_idx, value in enumerate(row, 1):
                 cell = worksheet.cell(row=row_idx, column=col_idx, value=value)
-                cell.alignment = data_alignment
+                if col_idx == participants_col_idx:
+                    cell.alignment = numeric_alignment
+                    if isinstance(value, (int, float)):
+                        cell.number_format = "#,##0"
+                else:
+                    cell.alignment = data_alignment
                 cell.border = thin_border
                 if is_zebra:
                     cell.fill = zebra_fill
