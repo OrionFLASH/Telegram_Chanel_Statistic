@@ -69,12 +69,19 @@ class ChannelScanner:
             return "Неизвестно"
         return str(participants_count)
     
-    async def _fetch_participants_count(self, entity: Channel) -> Optional[Any]:
+    async def _fetch_participants_count(
+        self,
+        entity: Channel,
+        full_channel_info: Optional[Any] = None,
+        full_chat_info: Optional[Any] = None,
+    ) -> Optional[Any]:
         """
         Пытается получить количество участников разными способами.
         
         Args:
             entity: Объект канала/группы из Telegram API
+            full_channel_info: Полная информация о канале (если уже получена)
+            full_chat_info: Полная информация о чате (если уже получена)
         
         Returns:
             Количество участников или None
@@ -82,6 +89,12 @@ class ChannelScanner:
         if hasattr(entity, "participants_count") and entity.participants_count:
             return entity.participants_count
         try:
+            if full_channel_info and hasattr(full_channel_info, "full_chat"):
+                if hasattr(full_channel_info.full_chat, "participants_count"):
+                    return full_channel_info.full_chat.participants_count
+            if full_chat_info and hasattr(full_chat_info, "full_chat"):
+                if hasattr(full_chat_info.full_chat, "participants_count"):
+                    return full_chat_info.full_chat.participants_count
             if isinstance(entity, Channel):
                 full_info = await self.client(functions.channels.GetFullChannelRequest(channel=entity))
                 if hasattr(full_info, "full_chat") and hasattr(full_info.full_chat, "participants_count"):
@@ -94,6 +107,80 @@ class ChannelScanner:
             return "Требуются права администратора"
         except Exception as e:
             self.logger.debug(f"Ошибка при получении количества участников через Full* методы: {e}")
+        return None
+
+    async def _fetch_linked_channel_info(self, linked_chat_id: int) -> Dict[str, Optional[str]]:
+        """
+        Получает информацию о связанном канале, если он доступен.
+        
+        Args:
+            linked_chat_id: ID связанного канала
+        
+        Returns:
+            Словарь с данными связанного канала
+        """
+        linked_data: Dict[str, Optional[str]] = {
+            "linked_chat_id": str(linked_chat_id),
+            "linked_chat_title": None,
+            "linked_chat_username": None,
+            "linked_chat_link": None,
+        }
+        try:
+            linked_entity = await self.client.get_entity(linked_chat_id)
+            linked_data["linked_chat_title"] = getattr(linked_entity, "title", None)
+            linked_data["linked_chat_username"] = getattr(linked_entity, "username", None)
+            if linked_data["linked_chat_username"]:
+                linked_data["linked_chat_link"] = f"https://t.me/{linked_data['linked_chat_username']}"
+        except Exception as e:
+            self.logger.debug(f"Не удалось получить данные связанного канала {linked_chat_id}: {e}")
+        return linked_data
+
+    async def _fetch_forum_topics(self, entity: Channel, limit: int = 100) -> List[str]:
+        """
+        Получает список тем форума для супергруппы с включенными темами.
+        
+        Args:
+            entity: Сущность супергруппы
+            limit: Максимальное количество тем для выборки
+        
+        Returns:
+            Список названий тем форума
+        """
+        topics: List[str] = []
+        try:
+            result = await self.client(
+                functions.channels.GetForumTopicsRequest(
+                    channel=entity,
+                    offset_date=None,
+                    offset_id=0,
+                    offset_topic=0,
+                    limit=limit,
+                )
+            )
+            for topic in getattr(result, "topics", []):
+                title = getattr(topic, "title", None)
+                if title:
+                    topics.append(title)
+        except Exception as e:
+            self.logger.debug(f"Не удалось получить темы форума для {entity.id}: {e}")
+        return topics
+
+    async def _fetch_last_message_date(self, entity: Channel) -> Optional[str]:
+        """
+        Получает дату последнего сообщения в канале/чате/группе.
+        
+        Args:
+            entity: Сущность канала/группы
+        
+        Returns:
+            Дата последнего сообщения в ISO формате или None
+        """
+        try:
+            messages = await self.client.get_messages(entity, limit=1)
+            if messages and messages[0] and messages[0].date:
+                return messages[0].date.isoformat()
+        except Exception as e:
+            self.logger.debug(f"Не удалось получить дату последнего сообщения для {entity.id}: {e}")
         return None
 
     async def _leave_channel_or_chat(self, entity: Channel) -> None:
@@ -124,8 +211,8 @@ class ChannelScanner:
         try:
             self.logger.debug(f"Получение информации о канале: {entity.title}")
             
-            # Получаем полную информацию о канале
-            full_info = await self.client.get_entity(entity)
+            # Получаем базовую информацию о канале
+            await self.client.get_entity(entity)
             
             # Базовые данные канала
             channel_data: Dict[str, Any] = {
@@ -139,8 +226,29 @@ class ChannelScanner:
                 "scanned_at": datetime.now().isoformat()
             }
             
+            # Пытаемся получить полную информацию для расширенных данных
+            full_channel_info = None
+            full_chat_info = None
+            try:
+                if isinstance(entity, Channel):
+                    full_channel_info = await self.client(
+                        functions.channels.GetFullChannelRequest(channel=entity)
+                    )
+                elif isinstance(entity, Chat):
+                    full_chat_info = await self.client(
+                        functions.messages.GetFullChatRequest(chat_id=entity.id)
+                    )
+            except ChatAdminRequiredError:
+                self.logger.debug("Требуются права администратора для получения полной информации")
+            except Exception as e:
+                self.logger.debug(f"Не удалось получить полную информацию: {e}")
+
             # Пытаемся получить количество участников
-            participants_count = await self._fetch_participants_count(entity)
+            participants_count = await self._fetch_participants_count(
+                entity,
+                full_channel_info=full_channel_info,
+                full_chat_info=full_chat_info,
+            )
             if participants_count is None:
                 # Дополнительная попытка через подсчет участников (только для групп)
                 if not entity.broadcast:
@@ -154,6 +262,36 @@ class ChannelScanner:
                     except Exception as e:
                         self.logger.debug(f"Не удалось получить количество участников через iter_participants: {e}")
             channel_data["participants_count"] = participants_count
+
+            # Связанный канал (если настроен)
+            linked_chat_id = None
+            if full_channel_info and hasattr(full_channel_info, "full_chat"):
+                linked_chat_id = getattr(full_channel_info.full_chat, "linked_chat_id", None)
+            if linked_chat_id:
+                linked_data = await self._fetch_linked_channel_info(linked_chat_id)
+                channel_data.update(linked_data)
+            else:
+                channel_data.update(
+                    {
+                        "linked_chat_id": None,
+                        "linked_chat_title": None,
+                        "linked_chat_username": None,
+                        "linked_chat_link": None,
+                    }
+                )
+
+            # Темы форума (если супергруппа с включенными темами)
+            forum_topics: List[str] = []
+            is_forum = False
+            if full_channel_info and hasattr(full_channel_info, "full_chat"):
+                is_forum = bool(getattr(full_channel_info.full_chat, "forum", False))
+            if is_forum and isinstance(entity, Channel):
+                forum_topics = await self._fetch_forum_topics(entity)
+            channel_data["forum_topics"] = forum_topics
+            channel_data["forum_topics_count"] = len(forum_topics)
+
+            # Дата последнего сообщения
+            channel_data["last_message_date"] = await self._fetch_last_message_date(entity)
             
             # Дополнительная информация
             if hasattr(entity, 'about'):
@@ -354,11 +492,22 @@ class ChannelScanner:
             "Участников",
             "Описание",
             "Ссылка",
+            "Связанный канал ID",
+            "Связанный канал",
+            "Связанный канал ссылка",
+            "Темы форума (кол-во)",
+            "Темы форума",
             "Дата создания",
+            "Дата последнего сообщения",
             "Дата сканирования",
         ]
         rows: List[List[Any]] = []
-        for channel in self.channels_data:
+        sorted_channels = sorted(
+            self.channels_data,
+            key=self._participants_sort_key,
+            reverse=True,
+        )
+        for channel in sorted_channels:
             if channel.get("is_broadcast"):
                 channel_type = "Канал"
             elif channel.get("is_megagroup"):
@@ -376,6 +525,8 @@ class ChannelScanner:
                 participants_cell = "Неизвестно"
             else:
                 participants_cell = str(participants_value)
+            forum_topics = channel.get("forum_topics") or []
+            forum_topics_text = "; ".join(str(item) for item in forum_topics) if forum_topics else ""
             rows.append(
                 [
                     str(channel.get("id", "")),
@@ -386,11 +537,34 @@ class ChannelScanner:
                     participants_cell,
                     str(channel.get("about", "")),
                     str(channel.get("link", "")),
+                    str(channel.get("linked_chat_id", "")) if channel.get("linked_chat_id") else "",
+                    str(channel.get("linked_chat_title", "")) if channel.get("linked_chat_title") else "",
+                    str(channel.get("linked_chat_link", "")) if channel.get("linked_chat_link") else "",
+                    int(channel.get("forum_topics_count", 0) or 0),
+                    forum_topics_text,
                     str(channel.get("created_date", "")) if channel.get("created_date") else "",
+                    str(channel.get("last_message_date", "")) if channel.get("last_message_date") else "",
                     str(channel.get("scanned_at", "")),
                 ]
             )
         return headers, rows
+
+    def _participants_sort_key(self, channel: Dict[str, Any]) -> int:
+        """
+        Возвращает числовой ключ для сортировки по количеству участников.
+        
+        Args:
+            channel: Данные канала
+        
+        Returns:
+            Число участников, если доступно, иначе 0
+        """
+        participants_value = channel.get("participants_count")
+        if isinstance(participants_value, int):
+            return participants_value
+        if isinstance(participants_value, str) and participants_value.isdigit():
+            return int(participants_value)
+        return 0
 
     def _apply_xlsx_styles(self, worksheet, headers: List[str], rows: List[List[str]]) -> None:
         """
