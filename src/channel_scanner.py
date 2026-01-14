@@ -148,19 +148,31 @@ class ChannelScanner:
         """
         topics: List[str] = []
         try:
-            result = await self.client(
-                functions.channels.GetForumTopicsRequest(
-                    channel=entity,
-                    offset_date=None,
-                    offset_id=0,
-                    offset_topic=0,
-                    limit=limit,
+            offset_id = 0
+            offset_topic = 0
+            remaining = limit
+            while remaining > 0:
+                result = await self.client(
+                    functions.channels.GetForumTopicsRequest(
+                        channel=entity,
+                        q="",
+                        offset_date=None,
+                        offset_id=offset_id,
+                        offset_topic=offset_topic,
+                        limit=min(remaining, 100),
+                    )
                 )
-            )
-            for topic in getattr(result, "topics", []):
-                title = getattr(topic, "title", None)
-                if title:
-                    topics.append(title)
+                result_topics = getattr(result, "topics", [])
+                if not result_topics:
+                    break
+                for topic in result_topics:
+                    title = getattr(topic, "title", None)
+                    if title:
+                        topics.append(title)
+                last_topic = result_topics[-1]
+                offset_topic = getattr(last_topic, "id", 0) or 0
+                offset_id = getattr(last_topic, "top_message", 0) or 0
+                remaining = limit - len(topics)
         except Exception as e:
             self.logger.debug(f"Не удалось получить темы форума для {entity.id}: {e}")
         return topics
@@ -183,27 +195,37 @@ class ChannelScanner:
             self.logger.debug(f"Не удалось получить дату последнего сообщения для {entity.id}: {e}")
         return None
 
-    async def _leave_channel_or_chat(self, entity: Channel) -> None:
+    async def _leave_channel_or_chat(self, entity: Channel) -> bool:
         """
         Выполняет отписку от канала или выход из группы.
         
         Args:
             entity: Сущность канала/группы
+        
+        Returns:
+            True, если отписка выполнена успешно
         """
         try:
             if isinstance(entity, Channel):
                 await self.client(functions.channels.LeaveChannelRequest(channel=entity))
             elif isinstance(entity, Chat):
                 await self.client(functions.messages.DeleteChatUser(chat_id=entity.id, user_id="me"))
+            return True
         except Exception as e:
             self.logger.error(f"Ошибка при попытке отписки от {entity.id}: {e}")
+            return False
 
-    async def get_channel_info(self, entity: Channel) -> Optional[Dict[str, Any]]:
+    async def get_channel_info(
+        self,
+        entity: Channel,
+        last_message_date: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         """
         Получает детальную информацию о канале.
         
         Args:
             entity: Объект канала из Telegram API
+            last_message_date: Дата последнего сообщения (если уже получена)
         
         Returns:
             Словарь с информацией о канале или None в случае ошибки
@@ -282,16 +304,19 @@ class ChannelScanner:
 
             # Темы форума (если супергруппа с включенными темами)
             forum_topics: List[str] = []
-            is_forum = False
+            is_forum = bool(getattr(entity, "forum", False))
             if full_channel_info and hasattr(full_channel_info, "full_chat"):
-                is_forum = bool(getattr(full_channel_info.full_chat, "forum", False))
+                is_forum = is_forum or bool(getattr(full_channel_info.full_chat, "forum", False))
             if is_forum and isinstance(entity, Channel):
                 forum_topics = await self._fetch_forum_topics(entity)
             channel_data["forum_topics"] = forum_topics
             channel_data["forum_topics_count"] = len(forum_topics)
 
             # Дата последнего сообщения
-            channel_data["last_message_date"] = await self._fetch_last_message_date(entity)
+            if last_message_date:
+                channel_data["last_message_date"] = last_message_date
+            else:
+                channel_data["last_message_date"] = await self._fetch_last_message_date(entity)
             
             # Дополнительная информация
             if hasattr(entity, 'about'):
@@ -348,11 +373,16 @@ class ChannelScanner:
             
             # Фильтруем только каналы и группы
             channels_and_groups = []
+            last_message_map: Dict[int, Optional[str]] = {}
             for dialog in dialogs:
                 entity = dialog.entity
                 # Проверяем, является ли это каналом или группой
                 if isinstance(entity, Channel):
                     channels_and_groups.append(entity)
+                    message_date = None
+                    if getattr(dialog, "message", None) and getattr(dialog.message, "date", None):
+                        message_date = dialog.message.date.isoformat()
+                    last_message_map[entity.id] = message_date
                     self.logger.debug(f"Найден канал/группа: {entity.title}")
             
             self.logger.info(f"Найдено каналов и групп: {len(channels_and_groups)}")
@@ -375,7 +405,10 @@ class ChannelScanner:
                     self.logger.info(
                         f"Обработка канала {index}/{len(channels_and_groups)}: {entity.title}"
                     )
-                    channel_info = await self.get_channel_info(entity)
+                    channel_info = await self.get_channel_info(
+                        entity,
+                        last_message_date=last_message_map.get(entity.id),
+                    )
                     if channel_info:
                         participants_text = self._format_participants_count(
                             channel_info.get("participants_count")
@@ -389,7 +422,13 @@ class ChannelScanner:
                                 f"Отписка по списку: {channel_info.get('title', '')} "
                                 f"(id: {channel_info.get('id')})"
                             )
-                            await self._leave_channel_or_chat(entity)
+                            is_unsubscribed = await self._leave_channel_or_chat(entity)
+                            if is_unsubscribed:
+                                channel_info["unsubscribed_status"] = "Да"
+                            else:
+                                channel_info["unsubscribed_status"] = "Ошибка отписки"
+                        else:
+                            channel_info["unsubscribed_status"] = "Нет"
                     # Небольшая задержка между запросами
                     if self.request_delay:
                         await asyncio.sleep(self.request_delay)
@@ -495,6 +534,7 @@ class ChannelScanner:
             "Связанный канал ID",
             "Связанный канал",
             "Связанный канал ссылка",
+            "Удален по списку",
             "Темы форума (кол-во)",
             "Темы форума",
             "Дата создания",
@@ -540,6 +580,7 @@ class ChannelScanner:
                     str(channel.get("linked_chat_id", "")) if channel.get("linked_chat_id") else "",
                     str(channel.get("linked_chat_title", "")) if channel.get("linked_chat_title") else "",
                     str(channel.get("linked_chat_link", "")) if channel.get("linked_chat_link") else "",
+                    str(channel.get("unsubscribed_status", "")),
                     int(channel.get("forum_topics_count", 0) or 0),
                     forum_topics_text,
                     str(channel.get("created_date", "")) if channel.get("created_date") else "",
