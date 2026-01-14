@@ -119,6 +119,7 @@ async def main() -> None:
         logger.info("Сохранение результатов сканирования")
         scanner.save_to_json("channels_data.json")
         scanner.save_to_text("channels_list.txt")
+        scanner.save_to_xlsx("channels_data.xlsx")
         
         # Выводим статистику
         logger.info("=" * 80)
@@ -140,6 +141,7 @@ async def main() -> None:
         logger.info("Результаты сохранены в файлы:")
         logger.info("  - channels_data.json (JSON формат)")
         logger.info("  - channels_list.txt (Текстовый формат)")
+        logger.info("  - channels_data.xlsx (Excel формат)")
         logger.info("=" * 80)
         
         # Закрываем клиент

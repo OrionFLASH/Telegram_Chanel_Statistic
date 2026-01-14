@@ -6,12 +6,17 @@
 """
 
 import asyncio
-from typing import List, Dict, Optional, Any
-from telethon import TelegramClient
-from telethon.tl.types import Channel, Chat, User
-from telethon.errors import FloodWaitError, ChatAdminRequiredError
 import json
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+from telethon import TelegramClient
+from telethon.errors import ChatAdminRequiredError, FloodWaitError
+from telethon.tl.types import Channel, Chat, User
 
 from logger_config import get_logger
 
@@ -230,4 +235,127 @@ class ChannelScanner:
             self.logger.info(f"Текстовый отчет сохранен в файл: {output_path}")
         except Exception as e:
             self.logger.error(f"Ошибка при сохранении текстового файла: {e}")
+            raise
+
+    def _build_xlsx_rows(self) -> Tuple[List[str], List[List[str]]]:
+        """
+        Подготавливает заголовки и строки для выгрузки в XLSX.
+        
+        Returns:
+            Заголовки и строки в виде списков строк
+        """
+        headers = [
+            "ID",
+            "Название",
+            "Username",
+            "Тип",
+            "Публичный",
+            "Участников",
+            "Описание",
+            "Ссылка",
+            "Дата создания",
+            "Дата сканирования",
+        ]
+        rows: List[List[str]] = []
+        for channel in self.channels_data:
+            if channel.get("is_broadcast"):
+                channel_type = "Канал"
+            elif channel.get("is_megagroup"):
+                channel_type = "Супергруппа"
+            elif channel.get("is_gigagroup"):
+                channel_type = "Гигагруппа"
+            else:
+                channel_type = "Группа"
+            participants_value = channel.get("participants_count")
+            if participants_value is None:
+                participants_text = "Неизвестно"
+            else:
+                participants_text = str(participants_value)
+            rows.append(
+                [
+                    str(channel.get("id", "")),
+                    str(channel.get("title", "")),
+                    str(channel.get("username", "")),
+                    channel_type,
+                    "Да" if channel.get("is_public") else "Нет",
+                    participants_text,
+                    str(channel.get("about", "")),
+                    str(channel.get("link", "")),
+                    str(channel.get("created_date", "")) if channel.get("created_date") else "",
+                    str(channel.get("scanned_at", "")),
+                ]
+            )
+        return headers, rows
+
+    def _apply_xlsx_styles(self, worksheet, headers: List[str], rows: List[List[str]]) -> None:
+        """
+        Применяет форматирование к листу XLSX для удобного просмотра.
+        
+        Args:
+            worksheet: Лист Excel
+            headers: Список заголовков
+            rows: Строки данных
+        """
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="2F75B5", end_color="2F75B5", fill_type="solid")
+        data_alignment = Alignment(vertical="top", wrap_text=True)
+        thin_border = Border(
+            left=Side(style="thin", color="D9D9D9"),
+            right=Side(style="thin", color="D9D9D9"),
+            top=Side(style="thin", color="D9D9D9"),
+            bottom=Side(style="thin", color="D9D9D9"),
+        )
+        zebra_fill = PatternFill(start_color="F3F6FA", end_color="F3F6FA", fill_type="solid")
+
+        for col_idx, header in enumerate(headers, 1):
+            cell = worksheet.cell(row=1, column=col_idx, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = thin_border
+
+        for row_idx, row in enumerate(rows, start=2):
+            is_zebra = row_idx % 2 == 0
+            for col_idx, value in enumerate(row, 1):
+                cell = worksheet.cell(row=row_idx, column=col_idx, value=value)
+                cell.alignment = data_alignment
+                cell.border = thin_border
+                if is_zebra:
+                    cell.fill = zebra_fill
+
+        worksheet.freeze_panes = "A2"
+        worksheet.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(rows) + 1}"
+
+        for col_idx, header in enumerate(headers, 1):
+            max_len = len(header)
+            for row in rows:
+                value = row[col_idx - 1]
+                if value:
+                    max_len = max(max_len, len(str(value)))
+            adjusted = min(max(max_len + 2, 12), 60)
+            worksheet.column_dimensions[get_column_letter(col_idx)].width = adjusted
+
+    def save_to_xlsx(self, filename: str = "channels_data.xlsx") -> None:
+        """
+        Сохраняет данные о каналах в XLSX файл с удобным форматированием.
+        
+        Args:
+            filename: Имя файла для сохранения
+        """
+        try:
+            output_path = Path(__file__).parent.parent / filename
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.title = "Каналы"
+
+            headers, rows = self._build_xlsx_rows()
+            worksheet.append(headers)
+            for row in rows:
+                worksheet.append(row)
+
+            self._apply_xlsx_styles(worksheet, headers, rows)
+            workbook.save(output_path)
+            self.logger.info(f"XLSX отчет сохранен в файл: {output_path}")
+        except Exception as e:
+            self.logger.error(f"Ошибка при сохранении XLSX файла: {e}")
             raise
