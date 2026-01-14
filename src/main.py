@@ -177,6 +177,7 @@ async def main() -> None:
         # Выполняем сканирование
         logger.info("Начало процесса сканирования")
         channels_data = await scanner.scan_all_channels()
+        await scanner.scan_private_chats()
         
         # Сохраняем результаты
         logger.info("Сохранение результатов сканирования")

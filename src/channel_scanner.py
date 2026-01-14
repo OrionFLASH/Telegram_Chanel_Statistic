@@ -278,14 +278,16 @@ class ChannelScanner:
                 # Дополнительная попытка через подсчет участников (только для групп)
                 if not entity.broadcast:
                     try:
-                            count = 0
-                            async for _ in self.client.iter_participants(entity):
-                                count += 1
-                                if count >= 10000:  # Ограничение для производительности
-                                    break
+                        count = 0
+                        async for _ in self.client.iter_participants(entity):
+                            count += 1
+                            if count >= 10000:  # Ограничение для производительности
+                                break
                         participants_count = count if count < 10000 else ">10000"
-                        except Exception as e:
-                        self.logger.debug(f"Не удалось получить количество участников через iter_participants: {e}")
+                    except Exception as e:
+                        self.logger.debug(
+                            f"Не удалось получить количество участников через iter_participants: {e}"
+                        )
             channel_data["participants_count"] = participants_count
 
             # Связанный канал (если настроен)
@@ -412,7 +414,7 @@ class ChannelScanner:
                         entity,
                         last_message_date=last_message_map.get(entity.id),
                     )
-                if channel_info:
+                    if channel_info:
                         participants_text = self._format_participants_count(
                             channel_info.get("participants_count")
                         )
