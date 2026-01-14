@@ -36,6 +36,8 @@ class ChannelScanner:
         request_delay: float = 0.2,
         unsubscribe_ids: Optional[Set[int]] = None,
         request_timeout: float = 60.0,
+        private_timeout: float = 600.0,
+        private_timeout_ids: Optional[Set[int]] = None,
     ) -> None:
         """
         Инициализация сканера каналов.
@@ -46,6 +48,8 @@ class ChannelScanner:
             request_delay: Небольшая задержка между запросами для снижения нагрузки
             unsubscribe_ids: Набор ID каналов/групп для авто-отписки
             request_timeout: Таймаут запроса в секундах для долгих операций
+            private_timeout: Отдельный таймаут для личных чатов из списка
+            private_timeout_ids: Набор ID личных чатов для отдельного таймаута
         """
         self.client = client
         self.logger = get_logger("channel_scanner")
@@ -57,6 +61,8 @@ class ChannelScanner:
         self.output_dir.mkdir(exist_ok=True)
         self.unsubscribe_ids = unsubscribe_ids or set()
         self.request_timeout = max(1.0, request_timeout)
+        self.private_timeout = max(1.0, private_timeout)
+        self.private_timeout_ids = private_timeout_ids or set()
 
     def _build_basic_channel_info(
         self,
@@ -159,7 +165,7 @@ class ChannelScanner:
             self.logger.debug(f"Ошибка при получении количества участников через Full* методы: {e}")
         return None
 
-    async def _fetch_linked_channel_info(self, linked_chat_id: int) -> Dict[str, Optional[str]]:
+    async def _fetch_linked_channel_info(self, linked_chat_id: int) -> Dict[str, Optional[Any]]:
         """
         Получает информацию о связанном канале, если он доступен.
         
@@ -169,14 +175,16 @@ class ChannelScanner:
         Returns:
             Словарь с данными связанного канала
         """
-        linked_data: Dict[str, Optional[str]] = {
+        linked_data: Dict[str, Optional[Any]] = {
             "linked_chat_id": str(linked_chat_id),
             "linked_chat_title": None,
             "linked_chat_username": None,
             "linked_chat_link": None,
+            "_linked_entity": None,
         }
         try:
             linked_entity = await self.client.get_entity(linked_chat_id)
+            linked_data["_linked_entity"] = linked_entity
             linked_data["linked_chat_title"] = getattr(linked_entity, "title", None)
             linked_data["linked_chat_username"] = getattr(linked_entity, "username", None)
             if linked_data["linked_chat_username"]:
@@ -344,8 +352,10 @@ class ChannelScanner:
             linked_chat_id = None
             if full_channel_info and hasattr(full_channel_info, "full_chat"):
                 linked_chat_id = getattr(full_channel_info.full_chat, "linked_chat_id", None)
+            linked_entity = None
             if linked_chat_id:
                 linked_data = await self._fetch_linked_channel_info(linked_chat_id)
+                linked_entity = linked_data.pop("_linked_entity", None)
                 channel_data.update(linked_data)
             else:
                 channel_data.update(
@@ -363,7 +373,20 @@ class ChannelScanner:
             if full_channel_info and hasattr(full_channel_info, "full_chat"):
                 is_forum = is_forum or bool(getattr(full_channel_info.full_chat, "forum", False))
             if is_forum and isinstance(entity, Channel):
+                self.logger.debug(f"Получение тем форума для {entity.id}")
                 forum_topics = await self._fetch_forum_topics(entity)
+                self.logger.debug(
+                    f"Темы форума для {entity.id}: {len(forum_topics)}"
+                )
+            if not forum_topics and linked_entity and isinstance(linked_entity, Channel):
+                if getattr(linked_entity, "megagroup", False):
+                    self.logger.debug(
+                        f"Получение тем форума для связанного чата {linked_entity.id}"
+                    )
+                    forum_topics = await self._fetch_forum_topics(linked_entity)
+                    self.logger.debug(
+                        f"Темы форума для связанного чата {linked_entity.id}: {len(forum_topics)}"
+                    )
             channel_data["forum_topics"] = forum_topics
             channel_data["forum_topics_count"] = len(forum_topics)
 
@@ -720,7 +743,11 @@ class ChannelScanner:
                 "border": 1,
             }
         )
-        data_format = workbook.add_format({"text_wrap": True, "valign": "top", "border": 1})
+        default_row_format = workbook.add_format({"bg_color": "#FFFFFF"})
+        worksheet.set_default_row(None, default_row_format)
+        data_format = workbook.add_format(
+            {"text_wrap": True, "valign": "top", "border": 1, "bg_color": "#FFFFFF"}
+        )
         zebra_format = workbook.add_format(
             {"text_wrap": True, "valign": "top", "border": 1, "bg_color": "#F3F6FA"}
         )
@@ -753,7 +780,7 @@ class ChannelScanner:
                                     "num_format": "yyyy-mm-dd hh:mm",
                                     "valign": "top",
                                     "border": 1,
-                                    "bg_color": "#F3F6FA" if is_zebra else None,
+                                    "bg_color": "#F3F6FA" if is_zebra else "#FFFFFF",
                                 }
                             )
                         worksheet.write_datetime(row_idx, col_idx, parsed, date_format_cache[is_zebra])
@@ -769,8 +796,7 @@ class ChannelScanner:
                             "border": 1,
                             "num_format": numeric_format_map[col_idx],
                         }
-                        if is_zebra:
-                            format_payload["bg_color"] = "#F3F6FA"
+                        format_payload["bg_color"] = "#F3F6FA" if is_zebra else "#FFFFFF"
                         numeric_format_cache[format_key] = workbook.add_format(format_payload)
                     fmt = numeric_format_cache[format_key]
                 worksheet.write(row_idx, col_idx, value, fmt)
@@ -908,12 +934,21 @@ class ChannelScanner:
                     )
                     start_time = monotonic()
                     try:
+                        timeout_value = (
+                            self.private_timeout
+                            if entity.id in self.private_timeout_ids
+                            else self.request_timeout
+                        )
+                        if entity.id in self.private_timeout_ids:
+                            self.logger.debug(
+                                f"Личный чат {entity.id}: применен отдельный таймаут {timeout_value} сек"
+                            )
                         chat_info = await asyncio.wait_for(
                             self._collect_private_chat_info(
                                 entity,
                                 last_message_map.get(entity.id),
                             ),
-                            timeout=self.request_timeout,
+                            timeout=timeout_value,
                         )
                     except asyncio.TimeoutError:
                         self.logger.warning(

@@ -118,6 +118,60 @@ def load_unsubscribe_ids() -> set:
     return ids
 
 
+def load_private_timeout_ids() -> set:
+    """
+    Загружает список ID личных чатов для отдельного таймаута из .env.
+    
+    Returns:
+        Набор ID личных чатов
+    """
+    logger = setup_logger("main")
+    raw_value = os.getenv("TELEGRAM_PRIVATE_TIMEOUT_IDS", "").strip()
+    if not raw_value:
+        return set()
+    ids: set = set()
+    for item in raw_value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            ids.add(int(item))
+        except ValueError as exc:
+            logger.warning(
+                f"Некорректный ID в TELEGRAM_PRIVATE_TIMEOUT_IDS: '{item}', пропуск"
+            )
+            logger.debug(f"Детали ошибки разбора ID: {exc}")
+    return ids
+
+
+def load_private_timeout_value(default_value: int = 600) -> int:
+    """
+    Загружает отдельный таймаут для личных чатов из переменных окружения.
+    
+    Args:
+        default_value: Значение по умолчанию в секундах
+    
+    Returns:
+        Таймаут запросов для личных чатов в секундах
+    """
+    logger = setup_logger("main")
+    timeout_raw = os.getenv("TELEGRAM_PRIVATE_TIMEOUT", "").strip()
+    if not timeout_raw:
+        return default_value
+    try:
+        timeout_value = int(timeout_raw)
+        if timeout_value <= 0:
+            raise ValueError("Таймаут должен быть положительным числом")
+        return timeout_value
+    except ValueError as exc:
+        logger.warning(
+            f"Некорректное значение TELEGRAM_PRIVATE_TIMEOUT '{timeout_raw}', "
+            f"используется значение по умолчанию {default_value}"
+        )
+        logger.debug(f"Детали ошибки при разборе TELEGRAM_PRIVATE_TIMEOUT: {exc}")
+        return default_value
+
+
 async def authenticate_client(client: TelegramClient, phone: str) -> None:
     """
     Выполняет аутентификацию клиента Telegram.
@@ -193,8 +247,15 @@ async def main() -> None:
         logger.info("Инициализация сканера каналов")
         concurrency = load_scan_concurrency()
         request_timeout = load_request_timeout()
+        private_timeout = load_private_timeout_value()
+        private_timeout_ids = load_private_timeout_ids()
         logger.info(f"Параллелизм сканирования: {concurrency}")
         logger.info(f"Таймаут запроса: {request_timeout} сек")
+        if private_timeout_ids:
+            logger.info(
+                f"Отдельный таймаут для личных чатов: {private_timeout} сек "
+                f"(ID: {len(private_timeout_ids)})"
+            )
         unsubscribe_ids = load_unsubscribe_ids()
         if unsubscribe_ids:
             logger.info(f"Активна авто-отписка, ID в списке: {len(unsubscribe_ids)}")
@@ -203,6 +264,8 @@ async def main() -> None:
             concurrency=concurrency,
             unsubscribe_ids=unsubscribe_ids,
             request_timeout=float(request_timeout),
+            private_timeout=float(private_timeout),
+            private_timeout_ids=private_timeout_ids,
         )
         
         # Выполняем сканирование
