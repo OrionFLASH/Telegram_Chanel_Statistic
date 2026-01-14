@@ -15,6 +15,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from telethon import TelegramClient
+from telethon.tl import functions
 from telethon.errors import ChatAdminRequiredError, FloodWaitError
 from telethon.tl.types import Channel, Chat, User
 
@@ -29,17 +30,64 @@ class ChannelScanner:
     в которых пользователь является участником, с детальной информацией.
     """
     
-    def __init__(self, client: TelegramClient) -> None:
+    def __init__(self, client: TelegramClient, concurrency: int = 16, request_delay: float = 0.2) -> None:
         """
         Инициализация сканера каналов.
         
         Args:
             client: Экземпляр TelegramClient для работы с API
+            concurrency: Максимальное количество одновременных запросов
+            request_delay: Небольшая задержка между запросами для снижения нагрузки
         """
         self.client = client
         self.logger = get_logger("channel_scanner")
         self.channels_data: List[Dict[str, Any]] = []
+        self.concurrency = max(1, concurrency)
+        self.request_delay = max(0.0, request_delay)
+        self.output_dir = Path(__file__).parent.parent / "OUT"
+        self.output_dir.mkdir(exist_ok=True)
+
+    def _format_participants_count(self, participants_count: Any) -> str:
+        """
+        Приводит количество участников к строке для логов и вывода.
+        
+        Args:
+            participants_count: Значение количества участников
+        
+        Returns:
+            Строковое представление количества участников
+        """
+        if participants_count is None:
+            return "Неизвестно"
+        return str(participants_count)
     
+    async def _fetch_participants_count(self, entity: Channel) -> Optional[Any]:
+        """
+        Пытается получить количество участников разными способами.
+        
+        Args:
+            entity: Объект канала/группы из Telegram API
+        
+        Returns:
+            Количество участников или None
+        """
+        if hasattr(entity, "participants_count") and entity.participants_count:
+            return entity.participants_count
+        try:
+            if isinstance(entity, Channel):
+                full_info = await self.client(functions.channels.GetFullChannelRequest(channel=entity))
+                if hasattr(full_info, "full_chat") and hasattr(full_info.full_chat, "participants_count"):
+                    return full_info.full_chat.participants_count
+            if isinstance(entity, Chat):
+                full_info = await self.client(functions.messages.GetFullChatRequest(chat_id=entity.id))
+                if hasattr(full_info, "full_chat") and hasattr(full_info.full_chat, "participants_count"):
+                    return full_info.full_chat.participants_count
+        except ChatAdminRequiredError:
+            return "Требуются права администратора"
+        except Exception as e:
+            self.logger.debug(f"Ошибка при получении количества участников через Full* методы: {e}")
+        return None
+
     async def get_channel_info(self, entity: Channel) -> Optional[Dict[str, Any]]:
         """
         Получает детальную информацию о канале.
@@ -69,36 +117,20 @@ class ChannelScanner:
             }
             
             # Пытаемся получить количество участников
-            try:
-                if entity.broadcast:
-                    # Для каналов используем get_participants
-                    participants = await self.client.get_participants(entity, limit=1)
-                    channel_data["participants_count"] = getattr(entity, 'participants_count', None)
-                else:
-                    # Для групп и супергрупп
-                    full_chat = await self.client.get_entity(entity)
-                    if hasattr(full_chat, 'participants_count'):
-                        channel_data["participants_count"] = full_chat.participants_count
-                    else:
-                        # Пытаемся получить через get_participants
-                        try:
-                            participants = await self.client.get_participants(entity, limit=1)
-                            # Получаем общее количество через итератор
-                            count = 0
-                            async for _ in self.client.iter_participants(entity):
-                                count += 1
-                                if count >= 10000:  # Ограничение для производительности
-                                    break
-                            channel_data["participants_count"] = count if count < 10000 else ">10000"
-                        except Exception as e:
-                            self.logger.debug(f"Не удалось получить количество участников: {e}")
-                            channel_data["participants_count"] = None
-            except ChatAdminRequiredError:
-                self.logger.debug("Требуются права администратора для получения количества участников")
-                channel_data["participants_count"] = "Требуются права администратора"
-            except Exception as e:
-                self.logger.debug(f"Ошибка при получении количества участников: {e}")
-                channel_data["participants_count"] = None
+            participants_count = await self._fetch_participants_count(entity)
+            if participants_count is None:
+                # Дополнительная попытка через подсчет участников (только для групп)
+                if not entity.broadcast:
+                    try:
+                        count = 0
+                        async for _ in self.client.iter_participants(entity):
+                            count += 1
+                            if count >= 10000:  # Ограничение для производительности
+                                break
+                        participants_count = count if count < 10000 else ">10000"
+                    except Exception as e:
+                        self.logger.debug(f"Не удалось получить количество участников через iter_participants: {e}")
+            channel_data["participants_count"] = participants_count
             
             # Дополнительная информация
             if hasattr(entity, 'about'):
@@ -121,7 +153,11 @@ class ChannelScanner:
             else:
                 channel_data["link"] = f"tg://resolve?domain={entity.id}"
             
-            self.logger.info(f"Успешно получена информация о канале: {channel_data['title']}")
+            participants_text = self._format_participants_count(channel_data.get("participants_count"))
+            self.logger.info(
+                f"Успешно получена информация о канале: {channel_data['title']} "
+                f"(подписчиков: {participants_text})"
+            )
             return channel_data
             
         except FloodWaitError as e:
@@ -160,14 +196,48 @@ class ChannelScanner:
             
             self.logger.info(f"Найдено каналов и групп: {len(channels_and_groups)}")
             
-            # Получаем информацию о каждом канале
-            for i, channel in enumerate(channels_and_groups, 1):
-                self.logger.info(f"Обработка канала {i}/{len(channels_and_groups)}: {channel.title}")
-                channel_info = await self.get_channel_info(channel)
-                if channel_info:
-                    self.channels_data.append(channel_info)
-                    # Небольшая задержка, чтобы не превысить лимиты API
-                    await asyncio.sleep(1)
+            # Получаем информацию о каждом канале с ограничением параллелизма
+            semaphore = asyncio.Semaphore(self.concurrency)
+
+            async def process_channel(index: int, entity: Channel) -> Optional[Dict[str, Any]]:
+                """
+                Обрабатывает один канал с ограничением параллелизма.
+                
+                Args:
+                    index: Порядковый номер канала
+                    entity: Сущность канала/группы
+                
+                Returns:
+                    Словарь с информацией о канале или None
+                """
+                async with semaphore:
+                    self.logger.info(
+                        f"Обработка канала {index}/{len(channels_and_groups)}: {entity.title}"
+                    )
+                    channel_info = await self.get_channel_info(entity)
+                    if channel_info:
+                        participants_text = self._format_participants_count(
+                            channel_info.get("participants_count")
+                        )
+                        self.logger.info(
+                            f"Канал обработан: {channel_info.get('title', '')} "
+                            f"(подписчиков: {participants_text})"
+                        )
+                    # Небольшая задержка между запросами
+                    if self.request_delay:
+                        await asyncio.sleep(self.request_delay)
+                    return channel_info
+
+            tasks = [
+                process_channel(index, channel)
+                for index, channel in enumerate(channels_and_groups, 1)
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, dict):
+                    self.channels_data.append(result)
+                elif isinstance(result, Exception):
+                    self.logger.error(f"Ошибка при обработке канала: {result}")
             
             self.logger.info(f"Сканирование завершено. Обработано каналов: {len(self.channels_data)}")
             return self.channels_data
@@ -184,7 +254,8 @@ class ChannelScanner:
             filename: Имя файла для сохранения
         """
         try:
-            output_path = Path(__file__).parent.parent / filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+            output_path = self.output_dir / self._append_timestamp(filename, timestamp)
             with open(output_path, 'w', encoding='utf-8') as f:
                 json.dump(self.channels_data, f, ensure_ascii=False, indent=2)
             self.logger.info(f"Данные сохранены в файл: {output_path}")
@@ -200,7 +271,8 @@ class ChannelScanner:
             filename: Имя файла для сохранения
         """
         try:
-            output_path = Path(__file__).parent.parent / filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+            output_path = self.output_dir / self._append_timestamp(filename, timestamp)
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write("=" * 80 + "\n")
                 f.write("СПИСОК КАНАЛОВ И ГРУПП TELEGRAM\n")
@@ -343,7 +415,8 @@ class ChannelScanner:
             filename: Имя файла для сохранения
         """
         try:
-            output_path = Path(__file__).parent.parent / filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+            output_path = self.output_dir / self._append_timestamp(filename, timestamp)
             workbook = Workbook()
             worksheet = workbook.active
             worksheet.title = "Каналы"
@@ -359,3 +432,19 @@ class ChannelScanner:
         except Exception as e:
             self.logger.error(f"Ошибка при сохранении XLSX файла: {e}")
             raise
+
+    def _append_timestamp(self, filename: str, timestamp: str) -> str:
+        """
+        Добавляет таймштамп к имени файла перед расширением.
+        
+        Args:
+            filename: Имя файла
+            timestamp: Таймштамп в формате YYYYMMDD_HHMM
+        
+        Returns:
+            Имя файла с добавленным таймштампом
+        """
+        if "." in filename:
+            name, ext = filename.rsplit(".", 1)
+            return f"{name}_{timestamp}.{ext}"
+        return f"{filename}_{timestamp}"

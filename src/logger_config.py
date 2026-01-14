@@ -28,8 +28,8 @@ def setup_logger(name: str, log_dir: str = "log") -> logging.Logger:
     log_path = Path(__file__).parent.parent / log_dir
     log_path.mkdir(exist_ok=True)
     
-    # Формируем имя файла по шаблону: Уровень_тема_годмесяцдень_час.log
-    timestamp = datetime.now().strftime("%Y%m%d_%H")
+    # Формируем имя файла по шаблону: Уровень_тема_годмесяцдень_часминута.log
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     info_log_file = log_path / f"INFO_{name}_{timestamp}.log"
     debug_log_file = log_path / f"DEBUG_{name}_{timestamp}.log"
     

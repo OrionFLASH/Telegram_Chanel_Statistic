@@ -36,6 +36,34 @@ def load_config() -> Tuple[Optional[str], Optional[str], Optional[str]]:
     return api_id, api_hash, phone
 
 
+def load_scan_concurrency(default_value: int = 16) -> int:
+    """
+    Загружает параметр параллелизма сканирования из переменных окружения.
+    
+    Args:
+        default_value: Значение по умолчанию, если переменная не задана
+    
+    Returns:
+        Количество одновременных задач для сканирования
+    """
+    logger = setup_logger("main")
+    concurrency_raw = os.getenv("TELEGRAM_CONCURRENCY", "").strip()
+    if not concurrency_raw:
+        return default_value
+    try:
+        concurrency_value = int(concurrency_raw)
+        if concurrency_value <= 0:
+            raise ValueError("Параллелизм должен быть положительным числом")
+        return concurrency_value
+    except ValueError as exc:
+        logger.warning(
+            f"Некорректное значение TELEGRAM_CONCURRENCY '{concurrency_raw}', "
+            f"используется значение по умолчанию {default_value}"
+        )
+        logger.debug(f"Детали ошибки при разборе TELEGRAM_CONCURRENCY: {exc}")
+        return default_value
+
+
 async def authenticate_client(client: TelegramClient, phone: str) -> None:
     """
     Выполняет аутентификацию клиента Telegram.
@@ -109,7 +137,9 @@ async def main() -> None:
         
         # Создаем сканер каналов
         logger.info("Инициализация сканера каналов")
-        scanner = ChannelScanner(client)
+        concurrency = load_scan_concurrency()
+        logger.info(f"Параллелизм сканирования: {concurrency}")
+        scanner = ChannelScanner(client, concurrency=concurrency)
         
         # Выполняем сканирование
         logger.info("Начало процесса сканирования")

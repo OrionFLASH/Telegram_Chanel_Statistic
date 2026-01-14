@@ -235,8 +235,10 @@ pip install -r requirements.txt
    TELEGRAM_API_ID=ваш_api_id
    TELEGRAM_API_HASH=ваш_api_hash
    TELEGRAM_PHONE=+79991234567
+   TELEGRAM_CONCURRENCY=16
    ```
    - Номер телефона указывайте в международном формате, как в Telegram
+   - `TELEGRAM_CONCURRENCY` задает количество одновременных задач сканирования
 
 ## Использование программы
 
@@ -253,24 +255,24 @@ python src/main.py
 1. При первом запуске программа запросит код подтверждения, который придет в Telegram
 2. Если у вас включена двухфакторная аутентификация, программа запросит пароль
 3. После авторизации начнется сканирование всех каналов
-4. Результаты будут сохранены в файлы:
-   - `channels_data.json` - данные в формате JSON
-   - `channels_list.txt` - данные в текстовом формате
-   - `channels_data.xlsx` - форматированный файл Excel
+4. Результаты будут сохранены в каталог `OUT/` с таймштампом `YYYYMMDD_HHMM`:
+   - `OUT/channels_data_YYYYMMDD_HHMM.json` - данные в формате JSON
+   - `OUT/channels_list_YYYYMMDD_HHMM.txt` - данные в текстовом формате
+   - `OUT/channels_data_YYYYMMDD_HHMM.xlsx` - форматированный файл Excel
 
 ### Результаты работы
 
-Программа создает три файла с результатами:
+Программа создает три файла с результатами (в каталоге `OUT/`, с таймштампом `YYYYMMDD_HHMM`):
 
-1. **channels_data.json** - структурированные данные в формате JSON, удобные для программной обработки
-2. **channels_list.txt** - текстовый файл с форматированным списком всех каналов
-3. **channels_data.xlsx** - XLSX файл с форматированными таблицами и автофильтрами
+1. **OUT/channels_data_YYYYMMDD_HHMM.json** - структурированные данные в формате JSON, удобные для программной обработки
+2. **OUT/channels_list_YYYYMMDD_HHMM.txt** - текстовый файл с форматированным списком всех каналов
+3. **OUT/channels_data_YYYYMMDD_HHMM.xlsx** - XLSX файл с форматированными таблицами и автофильтрами
 
 ### Логи
 
 Все логи сохраняются в папке `log/` с именами файлов по шаблону:
-- `INFO_telegram_scanner_YYYYMMDD_HH.log` - информационные логи
-- `DEBUG_telegram_scanner_YYYYMMDD_HH.log` - отладочные логи
+- `INFO_telegram_scanner_YYYYMMDD_HHMM.log` - информационные логи
+- `DEBUG_telegram_scanner_YYYYMMDD_HHMM.log` - отладочные логи
 
 ## История версий
 
