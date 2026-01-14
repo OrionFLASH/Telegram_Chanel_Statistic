@@ -697,6 +697,7 @@ class ChannelScanner:
         headers: List[str],
         rows: List[List[Any]],
         numeric_formats: Optional[Dict[str, str]] = None,
+        date_columns: Optional[Set[str]] = None,
     ) -> None:
         """
         Записывает данные и оформление листа XLSX.
@@ -724,12 +725,15 @@ class ChannelScanner:
             {"text_wrap": True, "valign": "top", "border": 1, "bg_color": "#F3F6FA"}
         )
         numeric_formats = numeric_formats or {}
+        date_columns = date_columns or set()
         numeric_format_map: Dict[int, str] = {
             headers.index(name): fmt
             for name, fmt in numeric_formats.items()
             if name in headers
         }
+        date_cols = {headers.index(name) for name in date_columns if name in headers}
         numeric_format_cache: Dict[Tuple[str, bool], Any] = {}
+        date_format_cache: Dict[bool, Any] = {}
 
         for col_idx, header in enumerate(headers):
             worksheet.write(0, col_idx, header, header_format)
@@ -738,6 +742,24 @@ class ChannelScanner:
             is_zebra = row_idx % 2 == 0
             for col_idx, value in enumerate(row):
                 fmt = zebra_format if is_zebra else data_format
+                if col_idx in date_cols and value:
+                    try:
+                        parsed = datetime.fromisoformat(str(value))
+                        if parsed.tzinfo:
+                            parsed = parsed.replace(tzinfo=None)
+                        if is_zebra not in date_format_cache:
+                            date_format_cache[is_zebra] = workbook.add_format(
+                                {
+                                    "num_format": "yyyy-mm-dd hh:mm",
+                                    "valign": "top",
+                                    "border": 1,
+                                    "bg_color": "#F3F6FA" if is_zebra else None,
+                                }
+                            )
+                        worksheet.write_datetime(row_idx, col_idx, parsed, date_format_cache[is_zebra])
+                        continue
+                    except ValueError:
+                        pass
                 if col_idx in numeric_format_map and isinstance(value, (int, float)):
                     format_key = (numeric_format_map[col_idx], is_zebra)
                     if format_key not in numeric_format_cache:
@@ -793,6 +815,11 @@ class ChannelScanner:
                     "Участников": "#,##0",
                     "Темы форума (кол-во)": "#,##0",
                 },
+                date_columns={
+                    "Дата создания",
+                    "Дата последнего сообщения",
+                    "Дата сканирования",
+                },
             )
 
             private_headers, private_rows = self._build_private_xlsx_rows()
@@ -811,6 +838,7 @@ class ChannelScanner:
                     "Сообщений от вас": "#,##0",
                     "Сообщений от собеседника": "#,##0",
                 },
+                date_columns={"Дата последнего сообщения"},
             )
             workbook.close()
             self.logger.info(f"XLSX отчет сохранен в файл: {output_path}")
