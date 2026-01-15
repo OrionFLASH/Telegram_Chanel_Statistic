@@ -216,34 +216,69 @@ class ChannelScanner:
         topics: List[str] = []
         seen_titles: Set[str] = set()
         try:
+            # Попытка получить темы через GetForumTopicsRequest
             offset_id = 0
             offset_topic = 0
             remaining = limit
-            while remaining > 0:
+            iteration = 0
+            max_iterations = 10  # Ограничение количества итераций для предотвращения бесконечного цикла
+            
+            while remaining > 0 and iteration < max_iterations:
+                iteration += 1
                 result = await self.client(
                     functions.channels.GetForumTopicsRequest(
                         channel=entity,
                         q="",
-                        offset_date=None,
+                        offset_date=0,
                         offset_id=offset_id,
                         offset_topic=offset_topic,
                         limit=min(remaining, 100),
                     )
                 )
+                
+                # Проверяем структуру результата
+                if not hasattr(result, "topics"):
+                    self.logger.debug(f"Результат GetForumTopicsRequest для {entity.id} не содержит 'topics'")
+                    break
+                
                 result_topics = getattr(result, "topics", [])
                 if not result_topics:
+                    self.logger.debug(f"Нет тем в результате для {entity.id} (итерация {iteration})")
                     break
+                
+                self.logger.debug(f"Получено {len(result_topics)} тем для {entity.id} (итерация {iteration})")
+                
                 for topic in result_topics:
                     title = getattr(topic, "title", None)
                     if title and title not in seen_titles:
                         seen_titles.add(title)
                         topics.append(title)
+                
+                # Проверяем, есть ли еще темы для загрузки
+                if len(result_topics) < min(remaining, 100):
+                    break
+                
+                # Обновляем offset для следующей итерации
                 last_topic = result_topics[-1]
-                offset_topic = getattr(last_topic, "id", 0) or 0
-                offset_id = getattr(last_topic, "top_message", 0) or 0
+                new_offset_topic = getattr(last_topic, "id", 0) or 0
+                new_offset_id = getattr(last_topic, "top_message", 0) or 0
+                
+                # Проверяем, что offset изменился, иначе выходим из цикла
+                if new_offset_topic == offset_topic and new_offset_id == offset_id:
+                    self.logger.debug(f"Offset не изменился для {entity.id}, завершение")
+                    break
+                
+                offset_topic = new_offset_topic
+                offset_id = new_offset_id
                 remaining = limit - len(topics)
+        except ChatAdminRequiredError:
+            self.logger.debug(f"Требуются права администратора для получения тем форума {entity.id}")
         except Exception as e:
-            self.logger.debug(f"Не удалось получить темы форума для {entity.id}: {e}")
+            error_msg = str(e)
+            error_type = type(e).__name__
+            self.logger.debug(
+                f"Не удалось получить темы форума для {entity.id}: {error_type}: {error_msg}"
+            )
         return topics
 
     async def _fetch_last_message_date(self, entity: Channel) -> Optional[str]:
@@ -362,8 +397,6 @@ class ChannelScanner:
                         self.logger.debug(
                             f"Не удалось получить количество участников через iter_participants: {e}"
                         )
-            channel_data["participants_count"] = participants_count
-
             # Связанный канал (если настроен)
             linked_chat_id = None
             if full_channel_info and hasattr(full_channel_info, "full_chat"):
@@ -388,21 +421,38 @@ class ChannelScanner:
             is_forum = bool(getattr(entity, "forum", False))
             if full_channel_info and hasattr(full_channel_info, "full_chat"):
                 is_forum = is_forum or bool(getattr(full_channel_info.full_chat, "forum", False))
-            if is_forum and isinstance(entity, Channel):
-                self.logger.debug(f"Получение тем форума для {entity.id}")
-                forum_topics = await self._fetch_forum_topics(entity)
+            
+            # Пробуем получить темы форума для всех супергрупп, даже если forum=False
+            # так как иногда флаг может быть не установлен, но темы есть
+            if isinstance(entity, Channel) and entity.megagroup:
                 self.logger.debug(
-                    f"Темы форума для {entity.id}: {len(forum_topics)}"
+                    f"Проверка тем форума для {entity.id} (is_forum={is_forum}, megagroup={entity.megagroup})"
                 )
+                forum_topics = await self._fetch_forum_topics(entity)
+                if forum_topics:
+                    self.logger.debug(
+                        f"Найдено тем форума для {entity.id}: {len(forum_topics)}"
+                    )
+                else:
+                    self.logger.debug(
+                        f"Темы форума для {entity.id} не найдены или недоступны"
+                    )
+            
+            # Пробуем получить темы из связанного чата, если в основном не нашли
             if not forum_topics and linked_entity and isinstance(linked_entity, Channel):
                 if getattr(linked_entity, "megagroup", False):
                     self.logger.debug(
-                        f"Получение тем форума для связанного чата {linked_entity.id}"
+                        f"Попытка получения тем форума для связанного чата {linked_entity.id}"
                     )
                     forum_topics = await self._fetch_forum_topics(linked_entity)
-                    self.logger.debug(
-                        f"Темы форума для связанного чата {linked_entity.id}: {len(forum_topics)}"
-                    )
+                    if forum_topics:
+                        self.logger.debug(
+                            f"Найдено тем форума для связанного чата {linked_entity.id}: {len(forum_topics)}"
+                        )
+                    else:
+                        self.logger.debug(
+                            f"Темы форума для связанного чата {linked_entity.id} не найдены"
+                        )
             channel_data["forum_topics"] = forum_topics
             channel_data["forum_topics_count"] = len(forum_topics)
 
@@ -470,18 +520,9 @@ class ChannelScanner:
                 channel_data["migrated_from_chat_id"] = getattr(full_chat, "migrated_from_chat_id", None) or ""
                 channel_data["migrated_from_max_id"] = getattr(full_chat, "migrated_from_max_id", None) or ""
                 
-                # Права пользователя (только самые важные, чтобы не перегружать)
+                # Права пользователя (только самые важные)
                 channel_data["can_view_participants"] = "Да" if getattr(full_chat, "can_view_participants", False) else "Нет"
                 channel_data["can_set_username"] = "Да" if getattr(full_chat, "can_set_username", False) else "Нет"
-                channel_data["can_set_stickers"] = "Да" if getattr(full_chat, "can_set_stickers", False) else "Нет"
-                channel_data["can_set_location"] = "Да" if getattr(full_chat, "can_set_location", False) else "Нет"
-                channel_data["can_set_invite_link"] = "Да" if getattr(full_chat, "can_set_invite_link", False) else "Нет"
-                channel_data["can_post_messages"] = "Да" if getattr(full_chat, "can_post_messages", False) else "Нет"
-                channel_data["can_edit_messages"] = "Да" if getattr(full_chat, "can_edit_messages", False) else "Нет"
-                channel_data["can_delete_messages"] = "Да" if getattr(full_chat, "can_delete_messages", False) else "Нет"
-                channel_data["can_pin_messages"] = "Да" if getattr(full_chat, "can_pin_messages", False) else "Нет"
-                channel_data["can_invite_users"] = "Да" if getattr(full_chat, "can_invite_users", False) else "Нет"
-                channel_data["can_change_info"] = "Да" if getattr(full_chat, "can_change_info", False) else "Нет"
             else:
                 # Значения по умолчанию, если full_channel_info недоступен
                 channel_data["slowmode_seconds"] = ""
@@ -494,15 +535,6 @@ class ChannelScanner:
                 channel_data["migrated_from_max_id"] = ""
                 channel_data["can_view_participants"] = ""
                 channel_data["can_set_username"] = ""
-                channel_data["can_set_stickers"] = ""
-                channel_data["can_set_location"] = ""
-                channel_data["can_set_invite_link"] = ""
-                channel_data["can_post_messages"] = ""
-                channel_data["can_edit_messages"] = ""
-                channel_data["can_delete_messages"] = ""
-                channel_data["can_pin_messages"] = ""
-                channel_data["can_invite_users"] = ""
-                channel_data["can_change_info"] = ""
             
             participants_text = self._format_participants_count(channel_data.get("participants_count"))
             self.logger.info(
@@ -739,15 +771,6 @@ class ChannelScanner:
             "Миграция из чата ID",
             "Можно просматривать участников",
             "Можно менять username",
-            "Можно устанавливать стикеры",
-            "Можно устанавливать геолокацию",
-            "Можно создавать ссылки-приглашения",
-            "Можно отправлять сообщения",
-            "Можно редактировать сообщения",
-            "Можно удалять сообщения",
-            "Можно закреплять сообщения",
-            "Можно приглашать пользователей",
-            "Можно менять информацию",
             "Удален по списку",
             "Статус обработки",
             "Темы форума (кол-во)",
@@ -809,15 +832,6 @@ class ChannelScanner:
                     channel.get("migrated_from_chat_id") if channel.get("migrated_from_chat_id") not in (None, "") else "",
                     str(channel.get("can_view_participants", "")),
                     str(channel.get("can_set_username", "")),
-                    str(channel.get("can_set_stickers", "")),
-                    str(channel.get("can_set_location", "")),
-                    str(channel.get("can_set_invite_link", "")),
-                    str(channel.get("can_post_messages", "")),
-                    str(channel.get("can_edit_messages", "")),
-                    str(channel.get("can_delete_messages", "")),
-                    str(channel.get("can_pin_messages", "")),
-                    str(channel.get("can_invite_users", "")),
-                    str(channel.get("can_change_info", "")),
                     str(channel.get("unsubscribed_status", "")),
                     str(channel.get("processing_status", "")),
                     int(channel.get("forum_topics_count", 0) or 0),
@@ -993,29 +1007,38 @@ class ChannelScanner:
             )
 
             private_headers, private_rows = self._build_private_xlsx_rows()
-            self._write_xlsx_sheet(
-                workbook,
-                "Личные чаты",
-                private_headers,
-                private_rows,
-                numeric_formats={
-                    "Сообщений за 90 дней": "#,##0",
-                    "Среднее в день": "#,##0.00",
-                    "Среднее в неделю": "#,##0.00",
-                    "Среднее в месяц": "#,##0.00",
-                    "Сообщений за год": "#,##0",
-                    "Сообщений всего": "#,##0",
-                    "Сообщений от вас": "#,##0",
-                    "Сообщений от собеседника": "#,##0",
+            
+            # Формируем numeric_formats в зависимости от наличия ID для подсчета текста
+            private_numeric_formats = {
+                "Сообщений за 90 дней": "#,##0",
+                "Среднее в день": "#,##0.00",
+                "Среднее в неделю": "#,##0.00",
+                "Среднее в месяц": "#,##0.00",
+                "Сообщений за год": "#,##0",
+                "Сообщений всего": "#,##0",
+                "Сообщений от вас": "#,##0",
+                "Сообщений от собеседника": "#,##0",
+                "Общих чатов": "#,##0",
+                "Время обработки (сек)": "0.00",
+            }
+            
+            # Добавляем форматы для колонок со словами и буквами только если есть ID в списке
+            if self.private_text_timeout_ids:
+                private_numeric_formats.update({
                     "Слов от вас": "#,##0",
                     "Слов от собеседника": "#,##0",
                     "Слов всего": "#,##0",
                     "Букв от вас": "#,##0",
                     "Букв от собеседника": "#,##0",
                     "Букв всего": "#,##0",
-                    "Общих чатов": "#,##0",
-                    "Время обработки (сек)": "0.00",
-                },
+                })
+            
+            self._write_xlsx_sheet(
+                workbook,
+                "Личные чаты",
+                private_headers,
+                private_rows,
+                numeric_formats=private_numeric_formats,
                 date_columns={"Дата последнего сообщения"},
             )
             workbook.close()
@@ -1119,9 +1142,9 @@ class ChannelScanner:
                     except asyncio.TimeoutError:
                         self.logger.warning(
                             f"Таймаут обработки личного чата {entity.id} ({name_with_username}) "
-                            f"(>{self.request_timeout:.0f} сек)"
+                            f"(>{timeout_value:.0f} сек)"
                         )
-                        chat_info = self._build_basic_private_chat_info(
+                        chat_info = await self._build_basic_private_chat_info(
                             entity,
                             last_message_map.get(entity.id),
                             status="Таймаут",
@@ -1235,15 +1258,90 @@ class ChannelScanner:
             average_per_week = round(messages_90 / (90 / 7), 2)
             average_per_month = round(messages_90 / 3, 2)
 
-            # Дополнительная информация о пользователе
-            about = getattr(entity, "about", None) or getattr(entity, "bio", None)
+            # Получаем полную информацию о пользователе для получения about/bio и других данных
+            about = None
+            common_chats_count = None
+            full_user_info = None
+            try:
+                full_user_info = await self.client(
+                    functions.users.GetFullUserRequest(id=entity)
+                )
+                # Пробуем разные способы доступа к about и common_chats_count
+                if full_user_info:
+                    # Способ 1: через full_user (основной способ для UserFull)
+                    if hasattr(full_user_info, "full_user"):
+                        full_user = full_user_info.full_user
+                        about = getattr(full_user, "about", None) or getattr(full_user, "bio", None)
+                        common_chats_count = getattr(full_user, "common_chats_count", None)
+                        if about:
+                            self.logger.debug(
+                                f"Получено 'О себе' для пользователя {entity.id} через full_user.about "
+                                f"[class: ChannelScanner | def: _collect_private_chat_info]"
+                            )
+                        if common_chats_count is not None:
+                            self.logger.debug(
+                                f"Получено 'Общих чатов' для пользователя {entity.id}: {common_chats_count} "
+                                f"через full_user.common_chats_count "
+                                f"[class: ChannelScanner | def: _collect_private_chat_info]"
+                            )
+                    # Способ 2: напрямую из full_user_info
+                    if not about:
+                        about = getattr(full_user_info, "about", None) or getattr(full_user_info, "bio", None)
+                        if about:
+                            self.logger.debug(
+                                f"Получено 'О себе' для пользователя {entity.id} напрямую из full_user_info "
+                                f"[class: ChannelScanner | def: _collect_private_chat_info]"
+                            )
+                    if common_chats_count is None:
+                        common_chats_count = getattr(full_user_info, "common_chats_count", None)
+                        if common_chats_count is not None:
+                            self.logger.debug(
+                                f"Получено 'Общих чатов' для пользователя {entity.id}: {common_chats_count} "
+                                f"напрямую из full_user_info "
+                                f"[class: ChannelScanner | def: _collect_private_chat_info]"
+                            )
+                    # Способ 3: через users (если есть)
+                    if not about and hasattr(full_user_info, "users") and full_user_info.users:
+                        for user_obj in full_user_info.users:
+                            about = getattr(user_obj, "about", None) or getattr(user_obj, "bio", None)
+                            if about:
+                                self.logger.debug(
+                                    f"Получено 'О себе' для пользователя {entity.id} через users "
+                                    f"[class: ChannelScanner | def: _collect_private_chat_info]"
+                                )
+                                break
+                    if not about:
+                        self.logger.debug(
+                            f"Не найдено 'О себе' для пользователя {entity.id}, "
+                            f"тип ответа: {type(full_user_info).__name__}, "
+                            f"атрибуты: {[attr for attr in dir(full_user_info) if not attr.startswith('_')]} "
+                            f"[class: ChannelScanner | def: _collect_private_chat_info]"
+                        )
+                    if common_chats_count is None:
+                        self.logger.debug(
+                            f"Не найдено 'Общих чатов' для пользователя {entity.id}, "
+                            f"тип ответа: {type(full_user_info).__name__} "
+                            f"[class: ChannelScanner | def: _collect_private_chat_info]"
+                        )
+            except Exception as e:
+                self.logger.debug(
+                    f"Не удалось получить полную информацию о пользователе {entity.id}: {e} "
+                    f"[class: ChannelScanner | def: _collect_private_chat_info]"
+                )
+            
+            # Если не получили через GetFullUserRequest, пробуем из базового объекта
+            if not about:
+                about = getattr(entity, "about", None) or getattr(entity, "bio", None)
+            if common_chats_count is None:
+                common_chats_count = getattr(entity, "common_chats_count", None)
+            
             is_bot = getattr(entity, "bot", False) or getattr(entity, "is_bot", False)
             is_verified = getattr(entity, "verified", False) or getattr(entity, "is_verified", False)
             is_premium = getattr(entity, "premium", False) or getattr(entity, "is_premium", False)
             is_scam = getattr(entity, "scam", False) or getattr(entity, "is_scam", False)
             is_fake = getattr(entity, "fake", False) or getattr(entity, "is_fake", False)
             is_restricted = getattr(entity, "restricted", False) or getattr(entity, "is_restricted", False)
-            common_chats_count = getattr(entity, "common_chats_count", None)
+            
             mutual_contact = getattr(entity, "mutual_contact", False)
             contact = getattr(entity, "contact", False)
             lang_code = getattr(entity, "lang_code", None)
@@ -1292,6 +1390,9 @@ class ChannelScanner:
         Returns:
             Заголовки и строки для XLSX
         """
+        # Проверяем, нужно ли включать колонки со словами и буквами
+        include_text_stats = bool(self.private_text_timeout_ids)
+        
         headers = [
             "ID",
             "Имя",
@@ -1306,12 +1407,20 @@ class ChannelScanner:
             "Сообщений всего",
             "Сообщений от вас",
             "Сообщений от собеседника",
-            "Слов от вас",
-            "Слов от собеседника",
-            "Слов всего",
-            "Букв от вас",
-            "Букв от собеседника",
-            "Букв всего",
+        ]
+        
+        # Добавляем колонки со словами и буквами только если есть ID в списке
+        if include_text_stats:
+            headers.extend([
+                "Слов от вас",
+                "Слов от собеседника",
+                "Слов всего",
+                "Букв от вас",
+                "Букв от собеседника",
+                "Букв всего",
+            ])
+        
+        headers.extend([
             "Бот",
             "Верифицирован",
             "Premium",
@@ -1322,10 +1431,9 @@ class ChannelScanner:
             "Общих чатов",
             "Взаимный контакт",
             "В контактах",
-            "Язык",
             "Время обработки (сек)",
             "Статус обработки",
-        ]
+        ])
         rows: List[List[Any]] = []
         sorted_chats = sorted(
             self.private_chats_data,
@@ -1333,45 +1441,51 @@ class ChannelScanner:
             reverse=True,
         )
         for chat in sorted_chats:
-            rows.append(
-                [
-                    str(chat.get("id", "")),
-                    str(chat.get("name", "")),
-                    str(chat.get("username", "")) if chat.get("username") else "",
-                    str(chat.get("phone", "")) if chat.get("phone") else "",
-                    str(chat.get("last_message_date", "")) if chat.get("last_message_date") else "",
-                    int(chat.get("messages_90", 0)),
-                    float(chat.get("avg_day", 0.0)),
-                    float(chat.get("avg_week", 0.0)),
-                    float(chat.get("avg_month", 0.0)),
-                    int(chat.get("messages_year", 0)),
-                    int(chat.get("messages_total", 0)),
-                    int(chat.get("messages_from_me", 0)),
-                    int(chat.get("messages_from_other", 0)),
+            row = [
+                str(chat.get("id", "")),
+                str(chat.get("name", "")),
+                str(chat.get("username", "")) if chat.get("username") else "",
+                str(chat.get("phone", "")) if chat.get("phone") else "",
+                str(chat.get("last_message_date", "")) if chat.get("last_message_date") else "",
+                int(chat.get("messages_90", 0)),
+                float(chat.get("avg_day", 0.0)),
+                float(chat.get("avg_week", 0.0)),
+                float(chat.get("avg_month", 0.0)),
+                int(chat.get("messages_year", 0)),
+                int(chat.get("messages_total", 0)),
+                int(chat.get("messages_from_me", 0)),
+                int(chat.get("messages_from_other", 0)),
+            ]
+            
+            # Добавляем данные о словах и буквах только если нужно
+            if include_text_stats:
+                row.extend([
                     chat.get("words_from_me", "") if chat.get("words_from_me") is not None else "",
                     chat.get("words_from_other", "") if chat.get("words_from_other") is not None else "",
                     chat.get("words_total", "") if chat.get("words_total") is not None else "",
                     chat.get("chars_from_me", "") if chat.get("chars_from_me") is not None else "",
                     chat.get("chars_from_other", "") if chat.get("chars_from_other") is not None else "",
                     chat.get("chars_total", "") if chat.get("chars_total") is not None else "",
-                    str(chat.get("is_bot", "")),
-                    str(chat.get("is_verified", "")),
-                    str(chat.get("is_premium", "")),
-                    str(chat.get("is_scam", "")),
-                    str(chat.get("is_fake", "")),
-                    str(chat.get("is_restricted", "")),
-                    str(chat.get("about", "")),
-                    chat.get("common_chats_count", "") if chat.get("common_chats_count") != "" else "",
-                    str(chat.get("mutual_contact", "")),
-                    str(chat.get("contact", "")),
-                    str(chat.get("lang_code", "")),
-                    float(chat.get("processing_time", 0.0)),
-                    str(chat.get("processing_status", "")),
-                ]
-            )
+                ])
+            
+            row.extend([
+                str(chat.get("is_bot", "")),
+                str(chat.get("is_verified", "")),
+                str(chat.get("is_premium", "")),
+                str(chat.get("is_scam", "")),
+                str(chat.get("is_fake", "")),
+                str(chat.get("is_restricted", "")),
+                str(chat.get("about", "")),
+                int(chat.get("common_chats_count", 0)) if chat.get("common_chats_count") not in (None, "") else "",
+                str(chat.get("mutual_contact", "")),
+                str(chat.get("contact", "")),
+                float(chat.get("processing_time", 0.0)),
+                str(chat.get("processing_status", "")),
+            ])
+            rows.append(row)
         return headers, rows
 
-    def _build_basic_private_chat_info(
+    async def _build_basic_private_chat_info(
         self,
         entity: User,
         last_message_date: Optional[str],
@@ -1391,14 +1505,69 @@ class ChannelScanner:
         display_name = " ".join(
             part for part in [getattr(entity, "first_name", ""), getattr(entity, "last_name", "")] if part
         ).strip() or "Без имени"
-        about = getattr(entity, "about", None) or getattr(entity, "bio", None)
+        
+        # Пытаемся получить полную информацию о пользователе для about/bio и common_chats_count
+        about = None
+        common_chats_count = None
+        try:
+            full_user_info = await self.client(
+                functions.users.GetFullUserRequest(id=entity)
+            )
+            # Пробуем разные способы доступа к about и common_chats_count
+            if full_user_info:
+                # Способ 1: через full_user (основной способ для UserFull)
+                if hasattr(full_user_info, "full_user"):
+                    full_user = full_user_info.full_user
+                    about = getattr(full_user, "about", None) or getattr(full_user, "bio", None)
+                    common_chats_count = getattr(full_user, "common_chats_count", None)
+                    if common_chats_count is not None:
+                        self.logger.debug(
+                            f"Получено 'Общих чатов' для пользователя {entity.id}: {common_chats_count} "
+                            f"через full_user.common_chats_count "
+                            f"[class: ChannelScanner | def: _build_basic_private_chat_info]"
+                        )
+                # Способ 2: напрямую из full_user_info
+                if not about:
+                    about = getattr(full_user_info, "about", None) or getattr(full_user_info, "bio", None)
+                if common_chats_count is None:
+                    common_chats_count = getattr(full_user_info, "common_chats_count", None)
+                    if common_chats_count is not None:
+                        self.logger.debug(
+                            f"Получено 'Общих чатов' для пользователя {entity.id}: {common_chats_count} "
+                            f"напрямую из full_user_info "
+                            f"[class: ChannelScanner | def: _build_basic_private_chat_info]"
+                        )
+                # Способ 3: через users (если есть)
+                if not about and hasattr(full_user_info, "users") and full_user_info.users:
+                    for user_obj in full_user_info.users:
+                        about = getattr(user_obj, "about", None) or getattr(user_obj, "bio", None)
+                        if about:
+                            break
+                if common_chats_count is None:
+                    self.logger.debug(
+                        f"Не найдено 'Общих чатов' для пользователя {entity.id}, "
+                        f"тип ответа: {type(full_user_info).__name__} "
+                        f"[class: ChannelScanner | def: _build_basic_private_chat_info]"
+                    )
+        except Exception as e:
+            self.logger.debug(
+                f"Не удалось получить полную информацию о пользователе {entity.id} "
+                f"в _build_basic_private_chat_info: {e} "
+                f"[class: ChannelScanner | def: _build_basic_private_chat_info]"
+            )
+        
+        # Если не получили через GetFullUserRequest, пробуем из базового объекта
+        if not about:
+            about = getattr(entity, "about", None) or getattr(entity, "bio", None)
+        if common_chats_count is None:
+            common_chats_count = getattr(entity, "common_chats_count", None)
+        
         is_bot = getattr(entity, "bot", False) or getattr(entity, "is_bot", False)
         is_verified = getattr(entity, "verified", False) or getattr(entity, "is_verified", False)
         is_premium = getattr(entity, "premium", False) or getattr(entity, "is_premium", False)
         is_scam = getattr(entity, "scam", False) or getattr(entity, "is_scam", False)
         is_fake = getattr(entity, "fake", False) or getattr(entity, "is_fake", False)
         is_restricted = getattr(entity, "restricted", False) or getattr(entity, "is_restricted", False)
-        common_chats_count = getattr(entity, "common_chats_count", None)
         mutual_contact = getattr(entity, "mutual_contact", False)
         contact = getattr(entity, "contact", False)
         lang_code = getattr(entity, "lang_code", None)
