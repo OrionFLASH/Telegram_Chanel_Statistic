@@ -1219,12 +1219,24 @@ class ChannelScanner:
             chars_from_me = 0
             chars_from_other = 0
 
+            # Переменные для хранения последних сообщений
+            last_text_from_me = None
+            last_text_from_other = None
+            last_system_message = None
+            last_message_any = None
+            last_message_type = None
+
             # Начинаем получение информации о пользователе параллельно с подсчетом сообщений
             full_user_info_task = asyncio.create_task(
                 self.client(functions.users.GetFullUserRequest(id=entity))
             )
             
             last_progress = monotonic()
+            # Оптимизация: для поиска последних сообщений ограничиваем итерацию первыми 2000 сообщениями
+            # Это ускорит обработку, так как последние сообщения обычно находятся в начале
+            messages_checked_for_last = 0
+            max_messages_for_last = 2000
+            
             # Оптимизация: iter_messages уже оптимизирован в Telethon, но можем ускорить обработку
             # Используем более эффективную обработку сообщений
             async for message in self.client.iter_messages(entity):
@@ -1232,12 +1244,53 @@ class ChannelScanner:
                     continue
                 message_date = message.date
                 messages_total += 1
+                
+                # Определяем тип сообщения
+                message_type = type(message).__name__
+                message_text = getattr(message, "message", None) or ""
+                is_system = hasattr(message, "action") and message.action is not None
+                
+                # Оптимизация: собираем последние сообщения только из первых N сообщений
+                if messages_checked_for_last < max_messages_for_last:
+                    messages_checked_for_last += 1
+                    
+                    # Сохраняем последнее сообщение любого типа (первое в итерации = самое новое)
+                    if last_message_any is None:
+                        last_message_any = message
+                        last_message_type = message_type
+                    
+                    # Проверяем, является ли сообщение текстовым
+                    is_text_message = bool(message_text and message_text.strip())
+                    
+                    if message.out:
+                        # Сохраняем последнее текстовое сообщение от меня (первое найденное = самое новое)
+                        if is_text_message and last_text_from_me is None:
+                            last_text_from_me = message_text[:500]  # Ограничиваем длину
+                    else:
+                        # Сохраняем последнее текстовое сообщение от собеседника (первое найденное = самое новое)
+                        if is_text_message and last_text_from_other is None:
+                            last_text_from_other = message_text[:500]  # Ограничиваем длину
+                    
+                    # Сохраняем последнее системное сообщение (первое найденное = самое новое)
+                    if is_system and last_system_message is None:
+                        if is_text_message:
+                            last_system_message = message_text[:500]
+                        else:
+                            # Если системное сообщение без текста, сохраняем тип действия
+                            action_type = type(message.action).__name__ if hasattr(message, "action") else "System"
+                            last_system_message = f"[{action_type}]"
+                    
+                    # Если нашли все нужные сообщения, можно прервать поиск (но продолжаем подсчет статистики)
+                    if last_text_from_me and last_text_from_other and last_system_message and last_message_any:
+                        # Не прерываем, так как нужно продолжить подсчет статистики
+                        pass
+                
                 if message.out:
                     messages_from_me += 1
                 else:
                     messages_from_other += 1
+                
                 if use_text_stats:
-                    message_text = getattr(message, "message", None) or ""
                     if message_text:
                         word_count = len(message_text.split())
                         char_count = len(message_text)
@@ -1357,12 +1410,25 @@ class ChannelScanner:
             contact = getattr(entity, "contact", False)
             lang_code = getattr(entity, "lang_code", None)
 
+            # Определяем тип последнего сообщения, если не было текстовых
+            if last_message_any and not last_text_from_me and not last_text_from_other:
+                if last_message_type:
+                    last_message_type_str = last_message_type
+                else:
+                    last_message_type_str = type(last_message_any).__name__
+            else:
+                last_message_type_str = ""
+            
             return {
                 "id": entity.id,
                 "name": display_name,
                 "username": getattr(entity, "username", None),
                 "phone": getattr(entity, "phone", None),
                 "last_message_date": last_message_date,
+                "last_text_from_me": last_text_from_me or "",
+                "last_text_from_other": last_text_from_other or "",
+                "last_system_message": last_system_message or "",
+                "last_message_type": last_message_type_str,
                 "messages_90": messages_90,
                 "avg_day": average_per_day,
                 "avg_week": average_per_week,
@@ -1410,6 +1476,10 @@ class ChannelScanner:
             "Username",
             "Телефон",
             "Дата последнего сообщения",
+            "Последнее сообщение от вас",
+            "Последнее сообщение от собеседника",
+            "Последнее системное сообщение",
+            "Тип последнего сообщения",
             "Сообщений за 90 дней",
             "Среднее в день",
             "Среднее в неделю",
@@ -1458,6 +1528,10 @@ class ChannelScanner:
                 str(chat.get("username", "")) if chat.get("username") else "",
                 str(chat.get("phone", "")) if chat.get("phone") else "",
                 str(chat.get("last_message_date", "")) if chat.get("last_message_date") else "",
+                str(chat.get("last_text_from_me", "")),
+                str(chat.get("last_text_from_other", "")),
+                str(chat.get("last_system_message", "")),
+                str(chat.get("last_message_type", "")),
                 int(chat.get("messages_90", 0)),
                 float(chat.get("avg_day", 0.0)),
                 float(chat.get("avg_week", 0.0)),
@@ -1588,6 +1662,10 @@ class ChannelScanner:
             "username": getattr(entity, "username", None),
             "phone": getattr(entity, "phone", None),
             "last_message_date": last_message_date,
+            "last_text_from_me": "",
+            "last_text_from_other": "",
+            "last_system_message": "",
+            "last_message_type": "",
             "messages_90": 0,
             "avg_day": 0.0,
             "avg_week": 0.0,
