@@ -620,10 +620,10 @@ class ChannelScanner:
                         last_message_date=last_message_map.get(entity.id),
                         status="Ошибка",
                     )
-                    # Небольшая задержка между запросами
-                    if self.request_delay:
-                        await asyncio.sleep(self.request_delay)
-                    return channel_info
+                # Небольшая задержка между запросами
+                if self.request_delay:
+                    await asyncio.sleep(self.request_delay)
+                return channel_info
 
             tasks = [
                 process_channel(index, channel)
