@@ -226,6 +226,32 @@ def load_private_text_timeout_ids() -> set:
     return ids
 
 
+def load_delete_private_chat_ids() -> set:
+    """
+    Загружает список ID личных чатов для удаления из .env.
+    
+    Returns:
+        Набор ID личных чатов для удаления
+    """
+    logger = setup_logger("main")
+    raw_value = os.getenv("TELEGRAM_DELETE_PRIVATE_CHAT_IDS", "").strip()
+    if not raw_value:
+        return set()
+    ids: set = set()
+    for item in raw_value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            ids.add(int(item))
+        except ValueError as exc:
+            logger.warning(
+                f"Некорректный ID в TELEGRAM_DELETE_PRIVATE_CHAT_IDS: '{item}', пропуск"
+            )
+            logger.debug(f"Детали ошибки разбора ID: {exc}")
+    return ids
+
+
 def load_private_text_timeout_value(default_value: int = 2000) -> int:
     """
     Загружает отдельный таймаут для расширенной статистики текста.
@@ -334,6 +360,8 @@ async def main() -> None:
         private_timeout_ids = load_private_timeout_ids()
         private_text_timeout = load_private_text_timeout_value()
         private_text_timeout_ids = load_private_text_timeout_ids()
+        delete_private_chat_ids = load_delete_private_chat_ids()
+        unsubscribe_ids = load_unsubscribe_ids()
         logger.info(f"Параллелизм сканирования: {concurrency}")
         logger.info(f"Таймаут запроса: {request_timeout} сек")
         logger.info(f"Таймаут обработки каналов: {channel_timeout} сек")
@@ -341,6 +369,10 @@ async def main() -> None:
             logger.info(
                 f"Отдельный таймаут для личных чатов: {private_timeout} сек "
                 f"(ID: {len(private_timeout_ids)})"
+            )
+        if delete_private_chat_ids:
+            logger.info(
+                f"Активна авто-удаление личных чатов, ID в списке: {len(delete_private_chat_ids)}"
             )
         if private_text_timeout_ids:
             logger.info(
@@ -360,6 +392,7 @@ async def main() -> None:
             private_timeout_ids=private_timeout_ids,
             private_text_timeout=float(private_text_timeout),
             private_text_timeout_ids=private_text_timeout_ids,
+            delete_private_chat_ids=delete_private_chat_ids,
         )
         
         # Выполняем сканирование

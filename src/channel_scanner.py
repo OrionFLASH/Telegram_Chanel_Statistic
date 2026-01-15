@@ -41,6 +41,7 @@ class ChannelScanner:
         private_timeout_ids: Optional[Set[int]] = None,
         private_text_timeout: float = 2000.0,
         private_text_timeout_ids: Optional[Set[int]] = None,
+        delete_private_chat_ids: Optional[Set[int]] = None,
     ) -> None:
         """
         Инициализация сканера каналов.
@@ -56,6 +57,7 @@ class ChannelScanner:
             private_timeout_ids: Набор ID личных чатов для отдельного таймаута
             private_text_timeout: Таймаут для расширенной статистики текста
             private_text_timeout_ids: Набор ID для расширенной статистики текста
+            delete_private_chat_ids: Набор ID личных чатов для удаления
         """
         self.client = client
         self.logger = get_logger("channel_scanner")
@@ -74,6 +76,7 @@ class ChannelScanner:
         self.private_timeout_ids = private_timeout_ids or set()
         self.private_text_timeout = max(1.0, private_text_timeout)
         self.private_text_timeout_ids = private_text_timeout_ids or set()
+        self.delete_private_chat_ids = delete_private_chat_ids or set()
 
     def _build_basic_channel_info(
         self,
@@ -319,6 +322,29 @@ class ChannelScanner:
             return True
         except Exception as e:
             self.logger.error(f"Ошибка при попытке отписки от {entity.id}: {e}")
+            return False
+
+    async def _delete_private_chat(self, entity: User) -> bool:
+        """
+        Удаляет личный чат с очисткой истории у обоих собеседников.
+        
+        Args:
+            entity: Пользователь личного чата
+        
+        Returns:
+            True, если удаление выполнено успешно
+        """
+        try:
+            await self.client(
+                functions.messages.DeleteHistoryRequest(
+                    peer=entity,
+                    max_id=0,  # 0 означает удалить всю историю
+                    revoke=True  # Удалить с обеих сторон
+                )
+            )
+            return True
+        except Exception as e:
+            self.logger.error(f"Ошибка при попытке удаления личного чата {entity.id}: {e}")
             return False
 
     async def get_channel_info(
@@ -1157,6 +1183,21 @@ class ChannelScanner:
                         self.logger.warning(
                             f"Долгая обработка личного чата {entity.id} ({name_with_username}): {duration:.1f} сек"
                         )
+                    
+                    # Проверяем, нужно ли удалить чат по списку
+                    if chat_info and chat_info.get("id") in self.delete_private_chat_ids:
+                        self.logger.info(
+                            f"Удаление по списку: {chat_info.get('name', '')} "
+                            f"(id: {chat_info.get('id')})"
+                        )
+                        is_deleted = await self._delete_private_chat(entity)
+                        if is_deleted:
+                            chat_info["deleted_status"] = "Да"
+                        else:
+                            chat_info["deleted_status"] = "Ошибка удаления"
+                    elif chat_info:
+                        chat_info["deleted_status"] = "Нет"
+                    
                     # Убрали задержку - Semaphore уже контролирует параллелизм
                     return chat_info
 
@@ -1454,6 +1495,7 @@ class ChannelScanner:
                 "mutual_contact": "Да" if mutual_contact else "Нет",
                 "contact": "Да" if contact else "Нет",
                 "lang_code": lang_code or "",
+                "deleted_status": "Нет",
                 "processing_status": "Ок",
             }
         except Exception as e:
@@ -1512,6 +1554,7 @@ class ChannelScanner:
             "Общих чатов",
             "Взаимный контакт",
             "В контактах",
+            "Удален по списку",
             "Время обработки (сек)",
             "Статус обработки",
         ])
@@ -1564,6 +1607,7 @@ class ChannelScanner:
                 int(chat.get("common_chats_count", 0)) if chat.get("common_chats_count") not in (None, "") else "",
                 str(chat.get("mutual_contact", "")),
                 str(chat.get("contact", "")),
+                str(chat.get("deleted_status", "")),
                 float(chat.get("processing_time", 0.0)),
                 str(chat.get("processing_status", "")),
             ])
@@ -1691,6 +1735,7 @@ class ChannelScanner:
             "mutual_contact": "Да" if mutual_contact else "Нет",
             "contact": "Да" if contact else "Нет",
             "lang_code": lang_code or "",
+            "deleted_status": "Нет",
             "processing_time": 0.0,
             "processing_status": status,
         }
