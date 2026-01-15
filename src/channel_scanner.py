@@ -36,6 +36,7 @@ class ChannelScanner:
         request_delay: float = 0.2,
         unsubscribe_ids: Optional[Set[int]] = None,
         request_timeout: float = 60.0,
+        channel_timeout: float = 100.0,
         private_timeout: float = 600.0,
         private_timeout_ids: Optional[Set[int]] = None,
         private_text_timeout: float = 2000.0,
@@ -50,6 +51,7 @@ class ChannelScanner:
             request_delay: Небольшая задержка между запросами для снижения нагрузки
             unsubscribe_ids: Набор ID каналов/групп для авто-отписки
             request_timeout: Таймаут запроса в секундах для долгих операций
+            channel_timeout: Таймаут обработки канала/группы в секундах (по умолчанию 100)
             private_timeout: Отдельный таймаут для личных чатов из списка
             private_timeout_ids: Набор ID личных чатов для отдельного таймаута
             private_text_timeout: Таймаут для расширенной статистики текста
@@ -65,6 +67,7 @@ class ChannelScanner:
         self.output_dir.mkdir(exist_ok=True)
         self.unsubscribe_ids = unsubscribe_ids or set()
         self.request_timeout = max(1.0, request_timeout)
+        self.channel_timeout = max(1.0, channel_timeout)
         self.private_timeout = max(1.0, private_timeout)
         self.private_timeout_ids = private_timeout_ids or set()
         self.private_text_timeout = max(1.0, private_text_timeout)
@@ -315,6 +318,13 @@ class ChannelScanner:
                 "processing_status": "Ок",
             }
             
+            # Флаги канала (быстрая проверка, не требует дополнительных запросов)
+            channel_data["is_verified"] = "Да" if getattr(entity, 'verified', False) else "Нет"
+            channel_data["is_scam"] = "Да" if getattr(entity, 'scam', False) else "Нет"
+            channel_data["is_fake"] = "Да" if getattr(entity, 'fake', False) else "Нет"
+            channel_data["is_restricted"] = "Да" if getattr(entity, 'restricted', False) else "Нет"
+            channel_data["is_min"] = "Да" if getattr(entity, 'min', False) else "Нет"
+            
             # Пытаемся получить полную информацию для расширенных данных
             full_channel_info = None
             full_chat_info = None
@@ -423,6 +433,77 @@ class ChannelScanner:
             else:
                 channel_data["link"] = f"tg://resolve?domain={entity.id}"
             
+            # Дополнительная статистика из full_channel_info (быстрые данные, не требуют долгих запросов)
+            if full_channel_info and hasattr(full_channel_info, "full_chat"):
+                full_chat = full_channel_info.full_chat
+                
+                # Режим медленной отправки
+                channel_data["slowmode_seconds"] = getattr(full_chat, "slowmode_seconds", None) or ""
+                
+                # Количество онлайн (если доступно)
+                channel_data["online_count"] = getattr(full_chat, "online_count", None) or ""
+                
+                # Количество непрочитанных сообщений
+                channel_data["unread_count"] = getattr(full_chat, "unread_count", None) or ""
+                
+                # ID закрепленного сообщения
+                channel_data["pinned_msg_id"] = getattr(full_chat, "pinned_msg_id", None) or ""
+                
+                # ID папки
+                channel_data["folder_id"] = getattr(full_chat, "folder_id", None) or ""
+                
+                # Геолокация (если установлена)
+                location = getattr(full_chat, "location", None)
+                if location:
+                    if hasattr(location, "geo_point"):
+                        geo = location.geo_point
+                        if hasattr(geo, "lat") and hasattr(geo, "long"):
+                            channel_data["location"] = f"{geo.lat}, {geo.long}"
+                        else:
+                            channel_data["location"] = "Установлена"
+                    else:
+                        channel_data["location"] = "Установлена"
+                else:
+                    channel_data["location"] = ""
+                
+                # Информация о миграции (если группа была мигрирована)
+                channel_data["migrated_from_chat_id"] = getattr(full_chat, "migrated_from_chat_id", None) or ""
+                channel_data["migrated_from_max_id"] = getattr(full_chat, "migrated_from_max_id", None) or ""
+                
+                # Права пользователя (только самые важные, чтобы не перегружать)
+                channel_data["can_view_participants"] = "Да" if getattr(full_chat, "can_view_participants", False) else "Нет"
+                channel_data["can_set_username"] = "Да" if getattr(full_chat, "can_set_username", False) else "Нет"
+                channel_data["can_set_stickers"] = "Да" if getattr(full_chat, "can_set_stickers", False) else "Нет"
+                channel_data["can_set_location"] = "Да" if getattr(full_chat, "can_set_location", False) else "Нет"
+                channel_data["can_set_invite_link"] = "Да" if getattr(full_chat, "can_set_invite_link", False) else "Нет"
+                channel_data["can_post_messages"] = "Да" if getattr(full_chat, "can_post_messages", False) else "Нет"
+                channel_data["can_edit_messages"] = "Да" if getattr(full_chat, "can_edit_messages", False) else "Нет"
+                channel_data["can_delete_messages"] = "Да" if getattr(full_chat, "can_delete_messages", False) else "Нет"
+                channel_data["can_pin_messages"] = "Да" if getattr(full_chat, "can_pin_messages", False) else "Нет"
+                channel_data["can_invite_users"] = "Да" if getattr(full_chat, "can_invite_users", False) else "Нет"
+                channel_data["can_change_info"] = "Да" if getattr(full_chat, "can_change_info", False) else "Нет"
+            else:
+                # Значения по умолчанию, если full_channel_info недоступен
+                channel_data["slowmode_seconds"] = ""
+                channel_data["online_count"] = ""
+                channel_data["unread_count"] = ""
+                channel_data["pinned_msg_id"] = ""
+                channel_data["folder_id"] = ""
+                channel_data["location"] = ""
+                channel_data["migrated_from_chat_id"] = ""
+                channel_data["migrated_from_max_id"] = ""
+                channel_data["can_view_participants"] = ""
+                channel_data["can_set_username"] = ""
+                channel_data["can_set_stickers"] = ""
+                channel_data["can_set_location"] = ""
+                channel_data["can_set_invite_link"] = ""
+                channel_data["can_post_messages"] = ""
+                channel_data["can_edit_messages"] = ""
+                channel_data["can_delete_messages"] = ""
+                channel_data["can_pin_messages"] = ""
+                channel_data["can_invite_users"] = ""
+                channel_data["can_change_info"] = ""
+            
             participants_text = self._format_participants_count(channel_data.get("participants_count"))
             self.logger.info(
                 f"Успешно получена информация о канале: {channel_data['title']} "
@@ -496,12 +577,12 @@ class ChannelScanner:
                                 entity,
                                 last_message_date=last_message_map.get(entity.id),
                             ),
-                            timeout=self.request_timeout,
+                            timeout=self.channel_timeout,
                         )
                     except asyncio.TimeoutError:
                         self.logger.warning(
                             f"Таймаут обработки канала {entity.id} "
-                            f"(>{self.request_timeout:.0f} сек)"
+                            f"(>{self.channel_timeout:.0f} сек)"
                         )
                         channel_info = self._build_basic_channel_info(
                             entity,
@@ -513,32 +594,32 @@ class ChannelScanner:
                         self.logger.warning(
                             f"Долгая обработка канала {entity.id}: {duration:.1f} сек"
                         )
-                    if channel_info:
-                        participants_text = self._format_participants_count(
-                            channel_info.get("participants_count")
-                        )
+                if channel_info:
+                    participants_text = self._format_participants_count(
+                        channel_info.get("participants_count")
+                    )
+                    self.logger.info(
+                        f"Канал обработан: {channel_info.get('title', '')} "
+                        f"(подписчиков: {participants_text})"
+                    )
+                    if channel_info.get("id") in self.unsubscribe_ids:
                         self.logger.info(
-                            f"Канал обработан: {channel_info.get('title', '')} "
-                            f"(подписчиков: {participants_text})"
+                            f"Отписка по списку: {channel_info.get('title', '')} "
+                            f"(id: {channel_info.get('id')})"
                         )
-                        if channel_info.get("id") in self.unsubscribe_ids:
-                            self.logger.info(
-                                f"Отписка по списку: {channel_info.get('title', '')} "
-                                f"(id: {channel_info.get('id')})"
-                            )
-                            is_unsubscribed = await self._leave_channel_or_chat(entity)
-                            if is_unsubscribed:
-                                channel_info["unsubscribed_status"] = "Да"
-                            else:
-                                channel_info["unsubscribed_status"] = "Ошибка отписки"
+                        is_unsubscribed = await self._leave_channel_or_chat(entity)
+                        if is_unsubscribed:
+                            channel_info["unsubscribed_status"] = "Да"
                         else:
-                            channel_info["unsubscribed_status"] = "Нет"
+                            channel_info["unsubscribed_status"] = "Ошибка отписки"
                     else:
-                        channel_info = self._build_basic_channel_info(
-                            entity,
-                            last_message_date=last_message_map.get(entity.id),
-                            status="Ошибка",
-                        )
+                        channel_info["unsubscribed_status"] = "Нет"
+                else:
+                    channel_info = self._build_basic_channel_info(
+                        entity,
+                        last_message_date=last_message_map.get(entity.id),
+                        status="Ошибка",
+                    )
                     # Небольшая задержка между запросами
                     if self.request_delay:
                         await asyncio.sleep(self.request_delay)
@@ -641,9 +722,32 @@ class ChannelScanner:
             "Участников",
             "Описание",
             "Ссылка",
+            "Верифицирован",
+            "Мошеннический",
+            "Фейковый",
+            "Ограниченный",
+            "Скрытый",
             "Связанный канал ID",
             "Связанный канал",
             "Связанный канал ссылка",
+            "Режим медленной отправки (сек)",
+            "Онлайн",
+            "Непрочитанных",
+            "ID закрепленного сообщения",
+            "ID папки",
+            "Геолокация",
+            "Миграция из чата ID",
+            "Можно просматривать участников",
+            "Можно менять username",
+            "Можно устанавливать стикеры",
+            "Можно устанавливать геолокацию",
+            "Можно создавать ссылки-приглашения",
+            "Можно отправлять сообщения",
+            "Можно редактировать сообщения",
+            "Можно удалять сообщения",
+            "Можно закреплять сообщения",
+            "Можно приглашать пользователей",
+            "Можно менять информацию",
             "Удален по списку",
             "Статус обработки",
             "Темы форума (кол-во)",
@@ -688,9 +792,32 @@ class ChannelScanner:
                     participants_cell,
                     str(channel.get("about", "")),
                     str(channel.get("link", "")),
+                    str(channel.get("is_verified", "")),
+                    str(channel.get("is_scam", "")),
+                    str(channel.get("is_fake", "")),
+                    str(channel.get("is_restricted", "")),
+                    str(channel.get("is_min", "")),
                     str(channel.get("linked_chat_id", "")) if channel.get("linked_chat_id") else "",
                     str(channel.get("linked_chat_title", "")) if channel.get("linked_chat_title") else "",
                     str(channel.get("linked_chat_link", "")) if channel.get("linked_chat_link") else "",
+                    channel.get("slowmode_seconds") if channel.get("slowmode_seconds") not in (None, "") else "",
+                    channel.get("online_count") if channel.get("online_count") not in (None, "") else "",
+                    channel.get("unread_count") if channel.get("unread_count") not in (None, "") else "",
+                    channel.get("pinned_msg_id") if channel.get("pinned_msg_id") not in (None, "") else "",
+                    channel.get("folder_id") if channel.get("folder_id") not in (None, "") else "",
+                    str(channel.get("location", "")),
+                    channel.get("migrated_from_chat_id") if channel.get("migrated_from_chat_id") not in (None, "") else "",
+                    str(channel.get("can_view_participants", "")),
+                    str(channel.get("can_set_username", "")),
+                    str(channel.get("can_set_stickers", "")),
+                    str(channel.get("can_set_location", "")),
+                    str(channel.get("can_set_invite_link", "")),
+                    str(channel.get("can_post_messages", "")),
+                    str(channel.get("can_edit_messages", "")),
+                    str(channel.get("can_delete_messages", "")),
+                    str(channel.get("can_pin_messages", "")),
+                    str(channel.get("can_invite_users", "")),
+                    str(channel.get("can_change_info", "")),
                     str(channel.get("unsubscribed_status", "")),
                     str(channel.get("processing_status", "")),
                     int(channel.get("forum_topics_count", 0) or 0),
@@ -774,6 +901,11 @@ class ChannelScanner:
         for row_idx, row in enumerate(rows, start=1):
             is_zebra = row_idx % 2 == 0
             for col_idx, value in enumerate(row):
+                # Пропускаем пустые значения (None или пустая строка)
+                if value is None or value == "":
+                    worksheet.write_blank(row_idx, col_idx, None, zebra_format if is_zebra else data_format)
+                    continue
+                
                 fmt = zebra_format if is_zebra else data_format
                 if col_idx in date_cols and value:
                     try:
@@ -791,7 +923,7 @@ class ChannelScanner:
                             )
                         worksheet.write_datetime(row_idx, col_idx, parsed, date_format_cache[is_zebra])
                         continue
-                    except ValueError:
+                    except (ValueError, TypeError):
                         pass
                 if col_idx in numeric_format_map and isinstance(value, (int, float)):
                     format_key = (numeric_format_map[col_idx], is_zebra)
@@ -846,6 +978,12 @@ class ChannelScanner:
                 numeric_formats={
                     "Участников": "#,##0",
                     "Темы форума (кол-во)": "#,##0",
+                    "Режим медленной отправки (сек)": "#,##0",
+                    "Онлайн": "#,##0",
+                    "Непрочитанных": "#,##0",
+                    "ID закрепленного сообщения": "#,##0",
+                    "ID папки": "#,##0",
+                    "Миграция из чата ID": "#,##0",
                 },
                 date_columns={
                     "Дата создания",
@@ -875,6 +1013,8 @@ class ChannelScanner:
                     "Букв от вас": "#,##0",
                     "Букв от собеседника": "#,##0",
                     "Букв всего": "#,##0",
+                    "Общих чатов": "#,##0",
+                    "Время обработки (сек)": "0.00",
                 },
                 date_columns={"Дата последнего сообщения"},
             )
@@ -940,9 +1080,16 @@ class ChannelScanner:
                     Словарь с данными личного чата или None
                 """
                 async with semaphore:
+                    display_name = " ".join(
+                        part for part in [
+                            getattr(entity, "first_name", ""),
+                            getattr(entity, "last_name", "")
+                        ] if part
+                    ).strip() or "Без имени"
+                    username = getattr(entity, "username", None)
+                    name_with_username = f"{display_name} (@{username})" if username else display_name
                     self.logger.info(
-                        f"Обработка личного чата {index}/{len(private_dialogs)}: "
-                        f"{getattr(entity, 'first_name', '')} {getattr(entity, 'last_name', '')}".strip()
+                        f"Обработка личного чата {index}/{len(private_dialogs)}: {name_with_username}"
                     )
                     start_time = monotonic()
                     try:
@@ -955,11 +1102,11 @@ class ChannelScanner:
                             timeout_value = self.request_timeout
                         if entity.id in self.private_text_timeout_ids:
                             self.logger.debug(
-                                f"Личный чат {entity.id}: таймаут для текста {timeout_value} сек"
+                                f"Личный чат {entity.id} ({name_with_username}): таймаут для текста {timeout_value} сек"
                             )
                         elif entity.id in self.private_timeout_ids:
                             self.logger.debug(
-                                f"Личный чат {entity.id}: применен отдельный таймаут {timeout_value} сек"
+                                f"Личный чат {entity.id} ({name_with_username}): применен отдельный таймаут {timeout_value} сек"
                             )
                         chat_info = await asyncio.wait_for(
                             self._collect_private_chat_info(
@@ -971,7 +1118,7 @@ class ChannelScanner:
                         )
                     except asyncio.TimeoutError:
                         self.logger.warning(
-                            f"Таймаут обработки личного чата {entity.id} "
+                            f"Таймаут обработки личного чата {entity.id} ({name_with_username}) "
                             f"(>{self.request_timeout:.0f} сек)"
                         )
                         chat_info = self._build_basic_private_chat_info(
@@ -980,9 +1127,11 @@ class ChannelScanner:
                             status="Таймаут",
                         )
                     duration = monotonic() - start_time
+                    if chat_info:
+                        chat_info["processing_time"] = round(duration, 2)
                     if duration > 10:
                         self.logger.warning(
-                            f"Долгая обработка личного чата {entity.id}: {duration:.1f} сек"
+                            f"Долгая обработка личного чата {entity.id} ({name_with_username}): {duration:.1f} сек"
                         )
                     if self.request_delay:
                         await asyncio.sleep(self.request_delay)
@@ -1086,12 +1235,24 @@ class ChannelScanner:
             average_per_week = round(messages_90 / (90 / 7), 2)
             average_per_month = round(messages_90 / 3, 2)
 
+            # Дополнительная информация о пользователе
+            about = getattr(entity, "about", None) or getattr(entity, "bio", None)
+            is_bot = getattr(entity, "bot", False) or getattr(entity, "is_bot", False)
+            is_verified = getattr(entity, "verified", False) or getattr(entity, "is_verified", False)
+            is_premium = getattr(entity, "premium", False) or getattr(entity, "is_premium", False)
+            is_scam = getattr(entity, "scam", False) or getattr(entity, "is_scam", False)
+            is_fake = getattr(entity, "fake", False) or getattr(entity, "is_fake", False)
+            is_restricted = getattr(entity, "restricted", False) or getattr(entity, "is_restricted", False)
+            common_chats_count = getattr(entity, "common_chats_count", None)
+            mutual_contact = getattr(entity, "mutual_contact", False)
+            contact = getattr(entity, "contact", False)
+            lang_code = getattr(entity, "lang_code", None)
+
             return {
                 "id": entity.id,
                 "name": display_name,
                 "username": getattr(entity, "username", None),
                 "phone": getattr(entity, "phone", None),
-                "participants": f"Вы; {display_name}",
                 "last_message_date": last_message_date,
                 "messages_90": messages_90,
                 "avg_day": average_per_day,
@@ -1107,6 +1268,17 @@ class ChannelScanner:
                 "chars_from_me": chars_from_me if use_text_stats else None,
                 "chars_from_other": chars_from_other if use_text_stats else None,
                 "chars_total": chars_total if use_text_stats else None,
+                "is_bot": "Да" if is_bot else "Нет",
+                "is_verified": "Да" if is_verified else "Нет",
+                "is_premium": "Да" if is_premium else "Нет",
+                "is_scam": "Да" if is_scam else "Нет",
+                "is_fake": "Да" if is_fake else "Нет",
+                "is_restricted": "Да" if is_restricted else "Нет",
+                "about": about or "",
+                "common_chats_count": common_chats_count if common_chats_count is not None else "",
+                "mutual_contact": "Да" if mutual_contact else "Нет",
+                "contact": "Да" if contact else "Нет",
+                "lang_code": lang_code or "",
                 "processing_status": "Ок",
             }
         except Exception as e:
@@ -1125,7 +1297,6 @@ class ChannelScanner:
             "Имя",
             "Username",
             "Телефон",
-            "Участники",
             "Дата последнего сообщения",
             "Сообщений за 90 дней",
             "Среднее в день",
@@ -1141,6 +1312,18 @@ class ChannelScanner:
             "Букв от вас",
             "Букв от собеседника",
             "Букв всего",
+            "Бот",
+            "Верифицирован",
+            "Premium",
+            "Мошенник",
+            "Фейк",
+            "Ограничен",
+            "О себе",
+            "Общих чатов",
+            "Взаимный контакт",
+            "В контактах",
+            "Язык",
+            "Время обработки (сек)",
             "Статус обработки",
         ]
         rows: List[List[Any]] = []
@@ -1156,7 +1339,6 @@ class ChannelScanner:
                     str(chat.get("name", "")),
                     str(chat.get("username", "")) if chat.get("username") else "",
                     str(chat.get("phone", "")) if chat.get("phone") else "",
-                    str(chat.get("participants", "")),
                     str(chat.get("last_message_date", "")) if chat.get("last_message_date") else "",
                     int(chat.get("messages_90", 0)),
                     float(chat.get("avg_day", 0.0)),
@@ -1172,6 +1354,18 @@ class ChannelScanner:
                     chat.get("chars_from_me", "") if chat.get("chars_from_me") is not None else "",
                     chat.get("chars_from_other", "") if chat.get("chars_from_other") is not None else "",
                     chat.get("chars_total", "") if chat.get("chars_total") is not None else "",
+                    str(chat.get("is_bot", "")),
+                    str(chat.get("is_verified", "")),
+                    str(chat.get("is_premium", "")),
+                    str(chat.get("is_scam", "")),
+                    str(chat.get("is_fake", "")),
+                    str(chat.get("is_restricted", "")),
+                    str(chat.get("about", "")),
+                    chat.get("common_chats_count", "") if chat.get("common_chats_count") != "" else "",
+                    str(chat.get("mutual_contact", "")),
+                    str(chat.get("contact", "")),
+                    str(chat.get("lang_code", "")),
+                    float(chat.get("processing_time", 0.0)),
                     str(chat.get("processing_status", "")),
                 ]
             )
@@ -1197,12 +1391,22 @@ class ChannelScanner:
         display_name = " ".join(
             part for part in [getattr(entity, "first_name", ""), getattr(entity, "last_name", "")] if part
         ).strip() or "Без имени"
+        about = getattr(entity, "about", None) or getattr(entity, "bio", None)
+        is_bot = getattr(entity, "bot", False) or getattr(entity, "is_bot", False)
+        is_verified = getattr(entity, "verified", False) or getattr(entity, "is_verified", False)
+        is_premium = getattr(entity, "premium", False) or getattr(entity, "is_premium", False)
+        is_scam = getattr(entity, "scam", False) or getattr(entity, "is_scam", False)
+        is_fake = getattr(entity, "fake", False) or getattr(entity, "is_fake", False)
+        is_restricted = getattr(entity, "restricted", False) or getattr(entity, "is_restricted", False)
+        common_chats_count = getattr(entity, "common_chats_count", None)
+        mutual_contact = getattr(entity, "mutual_contact", False)
+        contact = getattr(entity, "contact", False)
+        lang_code = getattr(entity, "lang_code", None)
         return {
             "id": entity.id,
             "name": display_name,
             "username": getattr(entity, "username", None),
             "phone": getattr(entity, "phone", None),
-            "participants": f"Вы; {display_name}",
             "last_message_date": last_message_date,
             "messages_90": 0,
             "avg_day": 0.0,
@@ -1218,5 +1422,17 @@ class ChannelScanner:
             "chars_from_me": None,
             "chars_from_other": None,
             "chars_total": None,
+            "is_bot": "Да" if is_bot else "Нет",
+            "is_verified": "Да" if is_verified else "Нет",
+            "is_premium": "Да" if is_premium else "Нет",
+            "is_scam": "Да" if is_scam else "Нет",
+            "is_fake": "Да" if is_fake else "Нет",
+            "is_restricted": "Да" if is_restricted else "Нет",
+            "about": about or "",
+            "common_chats_count": common_chats_count if common_chats_count is not None else "",
+            "mutual_contact": "Да" if mutual_contact else "Нет",
+            "contact": "Да" if contact else "Нет",
+            "lang_code": lang_code or "",
+            "processing_time": 0.0,
             "processing_status": status,
         }

@@ -144,6 +144,34 @@ def load_private_timeout_ids() -> set:
     return ids
 
 
+def load_channel_timeout(default_value: float = 100.0) -> float:
+    """
+    Загружает таймаут обработки каналов/групп из переменных окружения.
+    
+    Args:
+        default_value: Значение по умолчанию в секундах
+    
+    Returns:
+        Таймаут обработки каналов в секундах
+    """
+    logger = setup_logger("main")
+    timeout_raw = os.getenv("TELEGRAM_CHANNEL_TIMEOUT", "").strip()
+    if not timeout_raw:
+        return default_value
+    try:
+        timeout_value = float(timeout_raw)
+        if timeout_value <= 0:
+            raise ValueError("Таймаут должен быть положительным числом")
+        return timeout_value
+    except ValueError as exc:
+        logger.warning(
+            f"Некорректное значение TELEGRAM_CHANNEL_TIMEOUT '{timeout_raw}', "
+            f"используется значение по умолчанию {default_value}"
+        )
+        logger.debug(f"Детали ошибки при разборе TELEGRAM_CHANNEL_TIMEOUT: {exc}")
+        return default_value
+
+
 def load_private_timeout_value(default_value: int = 600) -> int:
     """
     Загружает отдельный таймаут для личных чатов из переменных окружения.
@@ -301,12 +329,14 @@ async def main() -> None:
         logger.info("Инициализация сканера каналов")
         concurrency = load_scan_concurrency()
         request_timeout = load_request_timeout()
+        channel_timeout = load_channel_timeout()
         private_timeout = load_private_timeout_value()
         private_timeout_ids = load_private_timeout_ids()
         private_text_timeout = load_private_text_timeout_value()
         private_text_timeout_ids = load_private_text_timeout_ids()
         logger.info(f"Параллелизм сканирования: {concurrency}")
         logger.info(f"Таймаут запроса: {request_timeout} сек")
+        logger.info(f"Таймаут обработки каналов: {channel_timeout} сек")
         if private_timeout_ids:
             logger.info(
                 f"Отдельный таймаут для личных чатов: {private_timeout} сек "
@@ -325,6 +355,7 @@ async def main() -> None:
             concurrency=concurrency,
             unsubscribe_ids=unsubscribe_ids,
             request_timeout=float(request_timeout),
+            channel_timeout=float(channel_timeout),
             private_timeout=float(private_timeout),
             private_timeout_ids=private_timeout_ids,
             private_text_timeout=float(private_text_timeout),
