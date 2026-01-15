@@ -38,6 +38,8 @@ class ChannelScanner:
         request_timeout: float = 60.0,
         private_timeout: float = 600.0,
         private_timeout_ids: Optional[Set[int]] = None,
+        private_text_timeout: float = 2000.0,
+        private_text_timeout_ids: Optional[Set[int]] = None,
     ) -> None:
         """
         Инициализация сканера каналов.
@@ -50,6 +52,8 @@ class ChannelScanner:
             request_timeout: Таймаут запроса в секундах для долгих операций
             private_timeout: Отдельный таймаут для личных чатов из списка
             private_timeout_ids: Набор ID личных чатов для отдельного таймаута
+            private_text_timeout: Таймаут для расширенной статистики текста
+            private_text_timeout_ids: Набор ID для расширенной статистики текста
         """
         self.client = client
         self.logger = get_logger("channel_scanner")
@@ -63,6 +67,8 @@ class ChannelScanner:
         self.request_timeout = max(1.0, request_timeout)
         self.private_timeout = max(1.0, private_timeout)
         self.private_timeout_ids = private_timeout_ids or set()
+        self.private_text_timeout = max(1.0, private_text_timeout)
+        self.private_text_timeout_ids = private_text_timeout_ids or set()
 
     def _build_basic_channel_info(
         self,
@@ -863,6 +869,12 @@ class ChannelScanner:
                     "Сообщений всего": "#,##0",
                     "Сообщений от вас": "#,##0",
                     "Сообщений от собеседника": "#,##0",
+                    "Слов от вас": "#,##0",
+                    "Слов от собеседника": "#,##0",
+                    "Слов всего": "#,##0",
+                    "Букв от вас": "#,##0",
+                    "Букв от собеседника": "#,##0",
+                    "Букв всего": "#,##0",
                 },
                 date_columns={"Дата последнего сообщения"},
             )
@@ -934,12 +946,18 @@ class ChannelScanner:
                     )
                     start_time = monotonic()
                     try:
-                        timeout_value = (
-                            self.private_timeout
-                            if entity.id in self.private_timeout_ids
-                            else self.request_timeout
-                        )
-                        if entity.id in self.private_timeout_ids:
+                        use_text_stats = entity.id in self.private_text_timeout_ids
+                        if entity.id in self.private_text_timeout_ids:
+                            timeout_value = self.private_text_timeout
+                        elif entity.id in self.private_timeout_ids:
+                            timeout_value = self.private_timeout
+                        else:
+                            timeout_value = self.request_timeout
+                        if entity.id in self.private_text_timeout_ids:
+                            self.logger.debug(
+                                f"Личный чат {entity.id}: таймаут для текста {timeout_value} сек"
+                            )
+                        elif entity.id in self.private_timeout_ids:
                             self.logger.debug(
                                 f"Личный чат {entity.id}: применен отдельный таймаут {timeout_value} сек"
                             )
@@ -947,6 +965,7 @@ class ChannelScanner:
                             self._collect_private_chat_info(
                                 entity,
                                 last_message_map.get(entity.id),
+                                use_text_stats,
                             ),
                             timeout=timeout_value,
                         )
@@ -997,6 +1016,7 @@ class ChannelScanner:
         self,
         entity: User,
         last_message_date: Optional[str],
+        use_text_stats: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """
         Собирает информацию и статистику по личному чату.
@@ -1020,6 +1040,12 @@ class ChannelScanner:
             messages_total = 0
             messages_from_me = 0
             messages_from_other = 0
+            words_total = 0
+            words_from_me = 0
+            words_from_other = 0
+            chars_total = 0
+            chars_from_me = 0
+            chars_from_other = 0
 
             last_progress = monotonic()
             async for message in self.client.iter_messages(entity):
@@ -1031,6 +1057,19 @@ class ChannelScanner:
                     messages_from_me += 1
                 else:
                     messages_from_other += 1
+                if use_text_stats:
+                    message_text = getattr(message, "message", None) or ""
+                    if message_text:
+                        word_count = len(message_text.split())
+                        char_count = len(message_text)
+                        words_total += word_count
+                        chars_total += char_count
+                        if message.out:
+                            words_from_me += word_count
+                            chars_from_me += char_count
+                        else:
+                            words_from_other += word_count
+                            chars_from_other += char_count
                 if message_date >= threshold_year:
                     messages_year += 1
                 if message_date >= threshold_90:
@@ -1062,6 +1101,12 @@ class ChannelScanner:
                 "messages_total": messages_total,
                 "messages_from_me": messages_from_me,
                 "messages_from_other": messages_from_other,
+                "words_from_me": words_from_me if use_text_stats else None,
+                "words_from_other": words_from_other if use_text_stats else None,
+                "words_total": words_total if use_text_stats else None,
+                "chars_from_me": chars_from_me if use_text_stats else None,
+                "chars_from_other": chars_from_other if use_text_stats else None,
+                "chars_total": chars_total if use_text_stats else None,
                 "processing_status": "Ок",
             }
         except Exception as e:
@@ -1090,6 +1135,12 @@ class ChannelScanner:
             "Сообщений всего",
             "Сообщений от вас",
             "Сообщений от собеседника",
+            "Слов от вас",
+            "Слов от собеседника",
+            "Слов всего",
+            "Букв от вас",
+            "Букв от собеседника",
+            "Букв всего",
             "Статус обработки",
         ]
         rows: List[List[Any]] = []
@@ -1115,6 +1166,12 @@ class ChannelScanner:
                     int(chat.get("messages_total", 0)),
                     int(chat.get("messages_from_me", 0)),
                     int(chat.get("messages_from_other", 0)),
+                    chat.get("words_from_me", "") if chat.get("words_from_me") is not None else "",
+                    chat.get("words_from_other", "") if chat.get("words_from_other") is not None else "",
+                    chat.get("words_total", "") if chat.get("words_total") is not None else "",
+                    chat.get("chars_from_me", "") if chat.get("chars_from_me") is not None else "",
+                    chat.get("chars_from_other", "") if chat.get("chars_from_other") is not None else "",
+                    chat.get("chars_total", "") if chat.get("chars_total") is not None else "",
                     str(chat.get("processing_status", "")),
                 ]
             )
@@ -1155,5 +1212,11 @@ class ChannelScanner:
             "messages_total": 0,
             "messages_from_me": 0,
             "messages_from_other": 0,
+            "words_from_me": None,
+            "words_from_other": None,
+            "words_total": None,
+            "chars_from_me": None,
+            "chars_from_other": None,
+            "chars_total": None,
             "processing_status": status,
         }

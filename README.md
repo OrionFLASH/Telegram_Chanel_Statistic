@@ -28,6 +28,7 @@
    - Среднее число сообщений в день/неделю/месяц за последние 3 месяца
    - Общее число сообщений за год и за все время
    - Число сообщений от вас и от собеседника
+   - Для выбранных личных чатов: число слов и букв (по собеседнику, по вам, всего)
    - Обработка личных чатов выполняется параллельно (по умолчанию 16 задач)
    - Статус обработки (Ок/Таймаут) и сортировка по "Сообщений всего" по убыванию
    - Отдельный таймаут для выбранных личных чатов (по списку ID)
@@ -250,6 +251,8 @@ pip install -r requirements.txt
    TELEGRAM_REQUEST_TIMEOUT=60
    TELEGRAM_PRIVATE_TIMEOUT=600
    TELEGRAM_PRIVATE_TIMEOUT_IDS=644264893,1876697589
+   TELEGRAM_PRIVATE_TEXT_TIMEOUT=2000
+   TELEGRAM_PRIVATE_TEXT_TIMEOUT_IDS=1876697589
    TELEGRAM_UNSUBSCRIBE_IDS=1088792240
    ```
    - Номер телефона указывайте в международном формате, как в Telegram
@@ -257,6 +260,8 @@ pip install -r requirements.txt
    - `TELEGRAM_REQUEST_TIMEOUT` задает таймаут запроса в секундах
    - `TELEGRAM_PRIVATE_TIMEOUT` задает отдельный таймаут для личных чатов
    - `TELEGRAM_PRIVATE_TIMEOUT_IDS` — список ID личных чатов для отдельного таймаута
+   - `TELEGRAM_PRIVATE_TEXT_TIMEOUT` задает таймаут для подсчета слов и букв
+   - `TELEGRAM_PRIVATE_TEXT_TIMEOUT_IDS` — список ID личных чатов для подсчета слов и букв
    - `TELEGRAM_UNSUBSCRIBE_IDS` — список ID каналов/групп для авто-отписки (через запятую)
 
 ## Использование программы
