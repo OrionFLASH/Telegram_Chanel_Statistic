@@ -156,27 +156,56 @@ class ChannelScanner:
         Returns:
             Количество участников или None
         """
-        if hasattr(entity, "participants_count") and entity.participants_count:
-            return entity.participants_count
+        # Способ 1: Проверяем напрямую в entity
+        if hasattr(entity, "participants_count") and entity.participants_count is not None:
+            count = entity.participants_count
+            if count > 0:
+                return count
+        
+        # Способ 2: Используем уже полученную полную информацию
         try:
             if full_channel_info and hasattr(full_channel_info, "full_chat"):
-                if hasattr(full_channel_info.full_chat, "participants_count"):
-                    return full_channel_info.full_chat.participants_count
+                full_chat = full_channel_info.full_chat
+                if hasattr(full_chat, "participants_count") and full_chat.participants_count is not None:
+                    count = full_chat.participants_count
+                    if count > 0:
+                        return count
             if full_chat_info and hasattr(full_chat_info, "full_chat"):
-                if hasattr(full_chat_info.full_chat, "participants_count"):
-                    return full_chat_info.full_chat.participants_count
+                full_chat = full_chat_info.full_chat
+                if hasattr(full_chat, "participants_count") and full_chat.participants_count is not None:
+                    count = full_chat.participants_count
+                    if count > 0:
+                        return count
+        except Exception as e:
+            self.logger.debug(f"Ошибка при проверке full_chat в уже полученной информации: {e}")
+        
+        # Способ 3: Запрашиваем полную информацию заново
+        try:
             if isinstance(entity, Channel):
                 full_info = await self.client(functions.channels.GetFullChannelRequest(channel=entity))
-                if hasattr(full_info, "full_chat") and hasattr(full_info.full_chat, "participants_count"):
-                    return full_info.full_chat.participants_count
-            if isinstance(entity, Chat):
+                if hasattr(full_info, "full_chat"):
+                    full_chat = full_info.full_chat
+                    if hasattr(full_chat, "participants_count") and full_chat.participants_count is not None:
+                        count = full_chat.participants_count
+                        if count > 0:
+                            return count
+            elif isinstance(entity, Chat):
                 full_info = await self.client(functions.messages.GetFullChatRequest(chat_id=entity.id))
-                if hasattr(full_info, "full_chat") and hasattr(full_info.full_chat, "participants_count"):
-                    return full_info.full_chat.participants_count
+                if hasattr(full_info, "full_chat"):
+                    full_chat = full_info.full_chat
+                    if hasattr(full_chat, "participants_count") and full_chat.participants_count is not None:
+                        count = full_chat.participants_count
+                        if count > 0:
+                            return count
         except ChatAdminRequiredError:
-            return "Требуются права администратора"
+            self.logger.debug(f"Требуются права администратора для получения количества участников {entity.id}")
+            return None
         except Exception as e:
-            self.logger.debug(f"Ошибка при получении количества участников через Full* методы: {e}")
+            self.logger.debug(
+                f"Ошибка при получении количества участников через GetFull* методы для {entity.id}: {e} "
+                f"[class: ChannelScanner | def: _fetch_participants_count]"
+            )
+        
         return None
 
     async def _fetch_linked_channel_info(self, linked_chat_id: int) -> Dict[str, Optional[Any]]:
@@ -416,15 +445,26 @@ class ChannelScanner:
                 if not entity.broadcast:
                     try:
                         count = 0
-                        async for _ in self.client.iter_participants(entity):
+                        async for _ in self.client.iter_participants(entity, limit=10000):
                             count += 1
                             if count >= 10000:  # Ограничение для производительности
                                 break
-                        participants_count = count if count < 10000 else ">10000"
+                        if count > 0:
+                            participants_count = count if count < 10000 else ">10000"
+                    except ChatAdminRequiredError:
+                        self.logger.debug(
+                            f"Требуются права администратора для подсчета участников через iter_participants для {entity.id} "
+                            f"[class: ChannelScanner | def: get_channel_info]"
+                        )
                     except Exception as e:
                         self.logger.debug(
-                            f"Не удалось получить количество участников через iter_participants: {e}"
+                            f"Не удалось получить количество участников через iter_participants для {entity.id}: {e} "
+                            f"[class: ChannelScanner | def: get_channel_info]"
                         )
+            
+            # Сохраняем количество участников в channel_data
+            channel_data["participants_count"] = participants_count
+            
             # Связанный канал (если настроен)
             linked_chat_id = None
             if full_channel_info and hasattr(full_channel_info, "full_chat"):
