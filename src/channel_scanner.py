@@ -353,17 +353,40 @@ class ChannelScanner:
             self.logger.error(f"Ошибка при попытке отписки от {entity.id}: {e}")
             return False
 
-    async def _delete_private_chat(self, entity: User) -> bool:
+    async def _delete_private_chat(self, entity: User, expected_id: int) -> bool:
         """
         Удаляет личный чат с очисткой истории у обоих собеседников.
         
         Args:
             entity: Пользователь личного чата
+            expected_id: Ожидаемый ID чата (для дополнительной проверки безопасности)
         
         Returns:
             True, если удаление выполнено успешно
+        
+        ВАЖНО: Этот метод выполняет необратимое удаление истории чата!
         """
+        # КРИТИЧЕСКАЯ ПРОВЕРКА БЕЗОПАСНОСТИ: проверяем ID перед удалением
+        if entity.id != expected_id:
+            self.logger.error(
+                f"КРИТИЧЕСКАЯ ОШИБКА: Несоответствие ID при удалении чата. "
+                f"Ожидался {expected_id}, получен {entity.id}. Удаление отменено."
+            )
+            return False
+        
+        # Дополнительная проверка: убеждаемся, что ID в списке для удаления
+        if entity.id not in self.delete_private_chat_ids:
+            self.logger.error(
+                f"КРИТИЧЕСКАЯ ОШИБКА: Попытка удалить чат {entity.id}, "
+                f"который не в списке delete_private_chat_ids. Удаление отменено."
+            )
+            return False
+        
         try:
+            self.logger.warning(
+                f"ВЫПОЛНЯЕТСЯ УДАЛЕНИЕ личного чата {entity.id} "
+                f"(необратимая операция с revoke=True)"
+            )
             await self.client(
                 functions.messages.DeleteHistoryRequest(
                     peer=entity,
@@ -371,9 +394,13 @@ class ChannelScanner:
                     revoke=True  # Удалить с обеих сторон
                 )
             )
+            self.logger.info(f"Личный чат {entity.id} успешно удален с очисткой истории.")
             return True
         except Exception as e:
-            self.logger.error(f"Ошибка при попытке удаления личного чата {entity.id}: {e}")
+            self.logger.error(
+                f"Ошибка при попытке удаления личного чата {entity.id}: {e} "
+                f"[class: ChannelScanner | def: _delete_private_chat]"
+            )
             return False
 
     async def get_channel_info(
@@ -1225,12 +1252,26 @@ class ChannelScanner:
                         )
                     
                     # Проверяем, нужно ли удалить чат по списку
-                    if chat_info and chat_info.get("id") in self.delete_private_chat_ids:
+                    # КРИТИЧЕСКАЯ ПРОВЕРКА БЕЗОПАСНОСТИ: тройная проверка ID
+                    # 1. Проверяем, что список delete_private_chat_ids не пустой
+                    # 2. Проверяем, что entity.id (реальный ID сущности) в списке для удаления
+                    # 3. Проверяем, что chat_info существует и chat_info.get("id") совпадает с entity.id
+                    # Это гарантирует, что удалится только тот чат, который явно указан в списке
+                    should_delete = (
+                        bool(self.delete_private_chat_ids)  # Список не пустой (явная проверка)
+                        and entity.id in self.delete_private_chat_ids  # ID сущности в списке
+                        and chat_info is not None  # chat_info существует
+                        and chat_info.get("id") == entity.id  # ID в chat_info совпадает с entity.id
+                    )
+                    
+                    if should_delete:
+                        # Логируем перед удалением для аудита
                         self.logger.info(
-                            f"Удаление по списку: {chat_info.get('name', '')} "
-                            f"(id: {chat_info.get('id')})"
+                            f"Удаление по списку: {chat_info.get('name', 'Неизвестно')} "
+                            f"(id: {entity.id}, проверка chat_info.id: {chat_info.get('id')})"
                         )
-                        is_deleted = await self._delete_private_chat(entity)
+                        # Вызываем метод удаления с проверкой ID
+                        is_deleted = await self._delete_private_chat(entity, entity.id)
                         if is_deleted:
                             chat_info["deleted_status"] = "Да"
                         else:
