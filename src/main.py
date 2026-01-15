@@ -36,7 +36,7 @@ def load_config() -> Tuple[Optional[str], Optional[str], Optional[str]]:
     return api_id, api_hash, phone
 
 
-def load_scan_concurrency(default_value: int = 16) -> int:
+def load_scan_concurrency(default_value: int = 32) -> int:
     """
     Загружает параметр параллелизма сканирования из переменных окружения.
     

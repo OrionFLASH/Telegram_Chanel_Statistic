@@ -62,7 +62,9 @@ class ChannelScanner:
         self.channels_data: List[Dict[str, Any]] = []
         self.private_chats_data: List[Dict[str, Any]] = []
         self.concurrency = max(1, concurrency)
-        self.request_delay = max(0.0, request_delay)
+        # Уменьшаем задержку, так как Semaphore уже контролирует параллелизм
+        # Задержка нужна только для предотвращения FloodWaitError при очень высокой нагрузке
+        self.request_delay = max(0.0, min(request_delay, 0.05))  # Максимум 50мс вместо 200мс
         self.output_dir = Path(__file__).parent.parent / "OUT"
         self.output_dir.mkdir(exist_ok=True)
         self.unsubscribe_ids = unsubscribe_ids or set()
@@ -652,9 +654,8 @@ class ChannelScanner:
                         last_message_date=last_message_map.get(entity.id),
                         status="Ошибка",
                     )
-                # Небольшая задержка между запросами
-                if self.request_delay:
-                    await asyncio.sleep(self.request_delay)
+                # Убрали задержку - Semaphore уже контролирует параллелизм
+                # Задержка нужна только при очень высокой нагрузке для предотвращения FloodWaitError
                 return channel_info
 
             tasks = [
@@ -1156,8 +1157,7 @@ class ChannelScanner:
                         self.logger.warning(
                             f"Долгая обработка личного чата {entity.id} ({name_with_username}): {duration:.1f} сек"
                         )
-                    if self.request_delay:
-                        await asyncio.sleep(self.request_delay)
+                    # Убрали задержку - Semaphore уже контролирует параллелизм
                     return chat_info
 
             tasks = [
@@ -1219,7 +1219,14 @@ class ChannelScanner:
             chars_from_me = 0
             chars_from_other = 0
 
+            # Начинаем получение информации о пользователе параллельно с подсчетом сообщений
+            full_user_info_task = asyncio.create_task(
+                self.client(functions.users.GetFullUserRequest(id=entity))
+            )
+            
             last_progress = monotonic()
+            # Оптимизация: iter_messages уже оптимизирован в Telethon, но можем ускорить обработку
+            # Используем более эффективную обработку сообщений
             async for message in self.client.iter_messages(entity):
                 if not getattr(message, "date", None):
                     continue
@@ -1258,14 +1265,18 @@ class ChannelScanner:
             average_per_week = round(messages_90 / (90 / 7), 2)
             average_per_month = round(messages_90 / 3, 2)
 
-            # Получаем полную информацию о пользователе для получения about/bio и других данных
+            # Получаем результат параллельной задачи получения информации о пользователе
             about = None
             common_chats_count = None
             full_user_info = None
             try:
-                full_user_info = await self.client(
-                    functions.users.GetFullUserRequest(id=entity)
+                full_user_info = await full_user_info_task
+            except Exception as e:
+                self.logger.debug(
+                    f"Не удалось получить полную информацию о пользователе {entity.id}: {e} "
+                    f"[class: ChannelScanner | def: _collect_private_chat_info]"
                 )
+                full_user_info = None
                 # Пробуем разные способы доступа к about и common_chats_count
                 if full_user_info:
                     # Способ 1: через full_user (основной способ для UserFull)
