@@ -228,10 +228,10 @@ class ChannelScanner:
         try:
             linked_entity = await self.client.get_entity(linked_chat_id)
             linked_data["_linked_entity"] = linked_entity
-            linked_data["linked_chat_title"] = getattr(linked_entity, "title", None)
-            linked_data["linked_chat_username"] = getattr(linked_entity, "username", None)
+            linked_data["linked_chat_title"] = self._sanitize_text_for_excel(getattr(linked_entity, "title", None))
+            linked_data["linked_chat_username"] = self._sanitize_text_for_excel(getattr(linked_entity, "username", None))
             if linked_data["linked_chat_username"]:
-                linked_data["linked_chat_link"] = f"https://t.me/{linked_data['linked_chat_username']}"
+                linked_data["linked_chat_link"] = self._sanitize_text_for_excel(f"https://t.me/{linked_data['linked_chat_username']}")
         except Exception as e:
             self.logger.debug(f"Не удалось получить данные связанного канала {linked_chat_id}: {e}")
         return linked_data
@@ -427,8 +427,8 @@ class ChannelScanner:
             # Базовые данные канала
             channel_data: Dict[str, Any] = {
                 "id": entity.id,
-                "title": entity.title or "Без названия",
-                "username": entity.username or "Нет username",
+                "title": self._sanitize_text_for_excel(entity.title or "Без названия"),
+                "username": self._sanitize_text_for_excel(entity.username or "Нет username"),
                 "is_broadcast": entity.broadcast,  # True для каналов, False для групп
                 "is_megagroup": entity.megagroup,  # True для супергрупп
                 "is_gigagroup": getattr(entity, 'gigagroup', False),
@@ -559,7 +559,7 @@ class ChannelScanner:
             
             # Дополнительная информация
             if hasattr(entity, 'about'):
-                channel_data["about"] = entity.about or "Нет описания"
+                channel_data["about"] = self._sanitize_text_for_excel(entity.about or "Нет описания")
             else:
                 channel_data["about"] = "Нет описания"
             
@@ -574,9 +574,9 @@ class ChannelScanner:
             
             # Ссылка на канал
             if entity.username:
-                channel_data["link"] = f"https://t.me/{entity.username}"
+                channel_data["link"] = self._sanitize_text_for_excel(f"https://t.me/{entity.username}")
             else:
-                channel_data["link"] = f"tg://resolve?domain={entity.id}"
+                channel_data["link"] = self._sanitize_text_for_excel(f"tg://resolve?domain={entity.id}")
             
             # Дополнительная статистика из full_channel_info (быстрые данные, не требуют долгих запросов)
             if full_channel_info and hasattr(full_channel_info, "full_chat"):
@@ -603,7 +603,7 @@ class ChannelScanner:
                     if hasattr(location, "geo_point"):
                         geo = location.geo_point
                         if hasattr(geo, "lat") and hasattr(geo, "long"):
-                            channel_data["location"] = f"{geo.lat}, {geo.long}"
+                            channel_data["location"] = self._sanitize_text_for_excel(f"{geo.lat}, {geo.long}")
                         else:
                             channel_data["location"] = "Установлена"
                     else:
@@ -902,40 +902,73 @@ class ChannelScanner:
             rows.append(
                 [
                     str(channel.get("id", "")),
-                    str(channel.get("title", "")),
-                    str(channel.get("username", "")),
+                    self._sanitize_text_for_excel(channel.get("title", "")),
+                    self._sanitize_text_for_excel(channel.get("username", "")),
                     channel_type,
                     "Да" if channel.get("is_public") else "Нет",
                     participants_cell,
-                    str(channel.get("about", "")),
-                    str(channel.get("link", "")),
+                    self._sanitize_text_for_excel(channel.get("about", "")),
+                    self._sanitize_text_for_excel(channel.get("link", "")),
                     str(channel.get("is_verified", "")),
                     str(channel.get("is_scam", "")),
                     str(channel.get("is_fake", "")),
                     str(channel.get("is_restricted", "")),
                     str(channel.get("is_min", "")),
                     str(channel.get("linked_chat_id", "")) if channel.get("linked_chat_id") else "",
-                    str(channel.get("linked_chat_title", "")) if channel.get("linked_chat_title") else "",
-                    str(channel.get("linked_chat_link", "")) if channel.get("linked_chat_link") else "",
+                    self._sanitize_text_for_excel(channel.get("linked_chat_title", "")),
+                    self._sanitize_text_for_excel(channel.get("linked_chat_link", "")),
                     channel.get("slowmode_seconds") if channel.get("slowmode_seconds") not in (None, "") else "",
                     channel.get("online_count") if channel.get("online_count") not in (None, "") else "",
                     channel.get("unread_count") if channel.get("unread_count") not in (None, "") else "",
                     channel.get("pinned_msg_id") if channel.get("pinned_msg_id") not in (None, "") else "",
                     channel.get("folder_id") if channel.get("folder_id") not in (None, "") else "",
-                    str(channel.get("location", "")),
+                    self._sanitize_text_for_excel(channel.get("location", "")),
                     channel.get("migrated_from_chat_id") if channel.get("migrated_from_chat_id") not in (None, "") else "",
                     str(channel.get("can_view_participants", "")),
                     str(channel.get("can_set_username", "")),
                     str(channel.get("unsubscribed_status", "")),
                     str(channel.get("processing_status", "")),
                     int(channel.get("forum_topics_count", 0) or 0),
-                    forum_topics_text,
+                    self._sanitize_text_for_excel(forum_topics_text),
                     str(channel.get("created_date", "")) if channel.get("created_date") else "",
                     str(channel.get("last_message_date", "")) if channel.get("last_message_date") else "",
                     str(channel.get("scanned_at", "")),
                 ]
             )
         return headers, rows
+
+    def _sanitize_text_for_excel(self, text: Any) -> str:
+        """
+        Очищает текст от недопустимых символов для Excel.
+        
+        Excel не может обработать управляющие символы (control characters),
+        кроме табуляции, переноса строки и возврата каретки.
+        
+        Args:
+            text: Текст для очистки (может быть строкой, None или другим типом)
+        
+        Returns:
+            Очищенная строка, пригодная для записи в Excel
+        """
+        if text is None:
+            return ""
+        
+        # Преобразуем в строку
+        text_str = str(text)
+        
+        # Удаляем управляющие символы, кроме табуляции (0x09), переноса строки (0x0A) и возврата каретки (0x0D)
+        # Управляющие символы имеют коды от 0x00 до 0x1F
+        sanitized = ""
+        for char in text_str:
+            char_code = ord(char)
+            # Разрешаем только печатные символы, табуляцию, перенос строки и возврат каретки
+            if char_code >= 32 or char_code in (9, 10, 13):
+                sanitized += char
+            # Заменяем недопустимые управляющие символы на пробел
+            elif char_code < 32:
+                sanitized += " "
+        
+        return sanitized
 
     def _participants_sort_key(self, channel: Dict[str, Any]) -> int:
         """
@@ -1387,16 +1420,19 @@ class ChannelScanner:
                     if message.out:
                         # Сохраняем последнее текстовое сообщение от меня (первое найденное = самое новое)
                         if is_text_message and last_text_from_me is None:
-                            last_text_from_me = message_text[:500]  # Ограничиваем длину
+                            # Ограничиваем длину и очищаем от недопустимых символов
+                            last_text_from_me = self._sanitize_text_for_excel(message_text[:500])
                     else:
                         # Сохраняем последнее текстовое сообщение от собеседника (первое найденное = самое новое)
                         if is_text_message and last_text_from_other is None:
-                            last_text_from_other = message_text[:500]  # Ограничиваем длину
+                            # Ограничиваем длину и очищаем от недопустимых символов
+                            last_text_from_other = self._sanitize_text_for_excel(message_text[:500])
                     
                     # Сохраняем последнее системное сообщение (первое найденное = самое новое)
                     if is_system and last_system_message is None:
                         if is_text_message:
-                            last_system_message = message_text[:500]
+                            # Ограничиваем длину и очищаем от недопустимых символов
+                            last_system_message = self._sanitize_text_for_excel(message_text[:500])
                         else:
                             # Если системное сообщение без текста, сохраняем тип действия
                             action_type = type(message.action).__name__ if hasattr(message, "action") else "System"
@@ -1543,14 +1579,14 @@ class ChannelScanner:
             
             return {
                 "id": entity.id,
-                "name": display_name,
-                "username": getattr(entity, "username", None),
+                "name": self._sanitize_text_for_excel(display_name),
+                "username": self._sanitize_text_for_excel(getattr(entity, "username", None)),
                 "phone": getattr(entity, "phone", None),
                 "last_message_date": last_message_date,
                 "last_text_from_me": last_text_from_me or "",
                 "last_text_from_other": last_text_from_other or "",
                 "last_system_message": last_system_message or "",
-                "last_message_type": last_message_type_str,
+                "last_message_type": self._sanitize_text_for_excel(last_message_type_str),
                 "messages_90": messages_90,
                 "avg_day": average_per_day,
                 "avg_week": average_per_week,
@@ -1571,7 +1607,7 @@ class ChannelScanner:
                 "is_scam": "Да" if is_scam else "Нет",
                 "is_fake": "Да" if is_fake else "Нет",
                 "is_restricted": "Да" if is_restricted else "Нет",
-                "about": about or "",
+                "about": self._sanitize_text_for_excel(about or ""),
                 "common_chats_count": common_chats_count if common_chats_count is not None else "",
                 "mutual_contact": "Да" if mutual_contact else "Нет",
                 "contact": "Да" if contact else "Нет",
@@ -1648,14 +1684,14 @@ class ChannelScanner:
         for chat in sorted_chats:
             row = [
                 str(chat.get("id", "")),
-                str(chat.get("name", "")),
-                str(chat.get("username", "")) if chat.get("username") else "",
+                self._sanitize_text_for_excel(chat.get("name", "")),
+                self._sanitize_text_for_excel(chat.get("username", "")) if chat.get("username") else "",
                 str(chat.get("phone", "")) if chat.get("phone") else "",
                 str(chat.get("last_message_date", "")) if chat.get("last_message_date") else "",
-                str(chat.get("last_text_from_me", "")),
-                str(chat.get("last_text_from_other", "")),
-                str(chat.get("last_system_message", "")),
-                str(chat.get("last_message_type", "")),
+                self._sanitize_text_for_excel(chat.get("last_text_from_me", "")),
+                self._sanitize_text_for_excel(chat.get("last_text_from_other", "")),
+                self._sanitize_text_for_excel(chat.get("last_system_message", "")),
+                self._sanitize_text_for_excel(chat.get("last_message_type", "")),
                 int(chat.get("messages_90", 0)),
                 float(chat.get("avg_day", 0.0)),
                 float(chat.get("avg_week", 0.0)),
@@ -1684,7 +1720,7 @@ class ChannelScanner:
                 str(chat.get("is_scam", "")),
                 str(chat.get("is_fake", "")),
                 str(chat.get("is_restricted", "")),
-                str(chat.get("about", "")),
+                self._sanitize_text_for_excel(chat.get("about", "")),
                 int(chat.get("common_chats_count", 0)) if chat.get("common_chats_count") not in (None, "") else "",
                 str(chat.get("mutual_contact", "")),
                 str(chat.get("contact", "")),
@@ -1811,7 +1847,7 @@ class ChannelScanner:
             "is_scam": "Да" if is_scam else "Нет",
             "is_fake": "Да" if is_fake else "Нет",
             "is_restricted": "Да" if is_restricted else "Нет",
-            "about": about or "",
+            "about": self._sanitize_text_for_excel(about or ""),
             "common_chats_count": common_chats_count if common_chats_count is not None else "",
             "mutual_contact": "Да" if mutual_contact else "Нет",
             "contact": "Да" if contact else "Нет",
