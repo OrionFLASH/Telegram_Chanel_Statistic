@@ -491,19 +491,19 @@ class ChannelScanner:
                 # Дополнительная попытка через подсчет участников (только для групп)
                 if not entity.broadcast:
                     try:
-                        count = 0
+                            count = 0
                         async for _ in self.client.iter_participants(entity, limit=10000):
-                            count += 1
-                            if count >= 10000:  # Ограничение для производительности
-                                break
+                                count += 1
+                                if count >= 10000:  # Ограничение для производительности
+                                    break
                         if count > 0:
                             participants_count = count if count < 10000 else ">10000"
-                    except ChatAdminRequiredError:
+            except ChatAdminRequiredError:
                         self.logger.debug(
                             f"Требуются права администратора для подсчета участников через iter_participants для {entity.id} "
                             f"[class: ChannelScanner | def: get_channel_info]"
                         )
-                    except Exception as e:
+            except Exception as e:
                         self.logger.debug(
                             f"Не удалось получить количество участников через iter_participants для {entity.id}: {e} "
                             f"[class: ChannelScanner | def: get_channel_info]"
@@ -1705,6 +1705,12 @@ class ChannelScanner:
             "Взаимный контакт",
             "В контактах",
             "Удален по списку",
+            "Фото профиля (всего)",
+            "Фото профиля (скачано)",
+            "Фото профиля (ошибок)",
+            "Истории (всего)",
+            "Истории (скачано)",
+            "Истории (ошибок)",
             "Время обработки (сек)",
             "Статус обработки",
         ])
@@ -1755,6 +1761,13 @@ class ChannelScanner:
                 str(chat.get("mutual_contact", "")),
                 str(chat.get("contact", "")),
                 str(chat.get("deleted_status", "")),
+                # Статистика фото и историй из user_media_stats
+                int(self.user_media_stats.get(chat.get("id"), {}).get("photos_total", 0) or 0),
+                int(self.user_media_stats.get(chat.get("id"), {}).get("photos_downloaded", 0) or 0),
+                int(self.user_media_stats.get(chat.get("id"), {}).get("photos_failed", 0) or 0),
+                int(self.user_media_stats.get(chat.get("id"), {}).get("stories_total", 0) or 0),
+                int(self.user_media_stats.get(chat.get("id"), {}).get("stories_downloaded", 0) or 0),
+                int(self.user_media_stats.get(chat.get("id"), {}).get("stories_failed", 0) or 0),
                 float(chat.get("processing_time", 0.0)),
                 str(chat.get("processing_status", "")),
             ])
