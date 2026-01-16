@@ -941,8 +941,8 @@ class ChannelScanner:
         """
         Очищает текст от недопустимых символов для Excel.
         
-        Excel не может обработать управляющие символы (control characters),
-        кроме табуляции, переноса строки и возврата каретки.
+        Excel не может обработать управляющие символы (control characters).
+        Также удаляются символы, которые Excel может интерпретировать как формулы.
         
         Args:
             text: Текст для очистки (может быть строкой, None или другим типом)
@@ -956,17 +956,33 @@ class ChannelScanner:
         # Преобразуем в строку
         text_str = str(text)
         
-        # Удаляем управляющие символы, кроме табуляции (0x09), переноса строки (0x0A) и возврата каретки (0x0D)
-        # Управляющие символы имеют коды от 0x00 до 0x1F
+        # Ограничиваем максимальную длину строки (Excel имеет ограничение на длину ячейки)
+        # Ограничиваем до 32767 символов (максимум для Excel)
+        if len(text_str) > 32767:
+            text_str = text_str[:32767]
+        
+        # Удаляем все управляющие символы (0x00-0x1F), кроме табуляции, переноса строки и возврата каретки
+        # Excel может иметь проблемы с некоторыми управляющими символами
         sanitized = ""
         for char in text_str:
             char_code = ord(char)
-            # Разрешаем только печатные символы, табуляцию, перенос строки и возврат каретки
-            if char_code >= 32 or char_code in (9, 10, 13):
+            # Разрешаем печатные символы (код >= 32) и некоторые безопасные управляющие символы
+            if char_code >= 32:
+                # Дополнительная проверка: удаляем некоторые проблемные Unicode символы
+                # Удаляем символы замены (U+FFFD) и другие проблемные символы
+                if char_code != 0xFFFD:  # Replacement Character
+                    sanitized += char
+            # Разрешаем табуляцию (0x09), перенос строки (0x0A) и возврат каретки (0x0D)
+            elif char_code in (9, 10, 13):
                 sanitized += char
-            # Заменяем недопустимые управляющие символы на пробел
-            elif char_code < 32:
+            # Заменяем остальные управляющие символы на пробел
+            else:
                 sanitized += " "
+        
+        # Удаляем символы, которые Excel может интерпретировать как начало формулы
+        # Если строка начинается с =, +, -, @, добавляем апостроф в начало
+        if sanitized and sanitized[0] in ('=', '+', '-', '@'):
+            sanitized = "'" + sanitized
         
         return sanitized
 
@@ -1037,7 +1053,9 @@ class ChannelScanner:
         date_format_cache: Dict[bool, Any] = {}
 
         for col_idx, header in enumerate(headers):
-            worksheet.write(0, col_idx, header, header_format)
+            # Очищаем заголовки перед записью
+            clean_header = self._sanitize_text_for_excel(header)
+            worksheet.write_string(0, col_idx, clean_header, header_format)
 
         for row_idx, row in enumerate(rows, start=1):
             is_zebra = row_idx % 2 == 0
@@ -1078,7 +1096,12 @@ class ChannelScanner:
                         format_payload["bg_color"] = "#F3F6FA" if is_zebra else "#FFFFFF"
                         numeric_format_cache[format_key] = workbook.add_format(format_payload)
                     fmt = numeric_format_cache[format_key]
-                worksheet.write(row_idx, col_idx, value, fmt)
+                # Очищаем и записываем строковые данные через write_string, чтобы Excel не интерпретировал их как формулы
+                if isinstance(value, str):
+                    clean_value = self._sanitize_text_for_excel(value)
+                    worksheet.write_string(row_idx, col_idx, clean_value, fmt)
+                else:
+                    worksheet.write(row_idx, col_idx, value, fmt)
 
         # Закрепляем первую строку (заголовок) и первые 3 колонки (A, B, C) на позиции D1
         worksheet.freeze_panes(1, 3)
