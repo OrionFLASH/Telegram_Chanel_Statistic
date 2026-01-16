@@ -280,6 +280,34 @@ def load_private_text_timeout_value(default_value: int = 2000) -> int:
         return default_value
 
 
+def load_photos_timeout_value(default_value: float = 100.0) -> float:
+    """
+    Загружает таймаут для скачивания фотографий профиля.
+    
+    Args:
+        default_value: Значение по умолчанию в секундах
+    
+    Returns:
+        Таймаут для скачивания фотографий в секундах
+    """
+    logger = setup_logger("main")
+    timeout_raw = os.getenv("TELEGRAM_PHOTOS_TIMEOUT", "").strip()
+    if not timeout_raw:
+        return default_value
+    try:
+        timeout_value = float(timeout_raw)
+        if timeout_value <= 0:
+            raise ValueError("Таймаут должен быть положительным числом")
+        return timeout_value
+    except ValueError as exc:
+        logger.warning(
+            f"Некорректное значение TELEGRAM_PHOTOS_TIMEOUT '{timeout_raw}', "
+            f"используется значение по умолчанию {default_value}"
+        )
+        logger.debug(f"Детали ошибки при разборе TELEGRAM_PHOTOS_TIMEOUT: {exc}")
+        return default_value
+
+
 async def authenticate_client(client: TelegramClient, phone: str) -> None:
     """
     Выполняет аутентификацию клиента Telegram.
@@ -361,6 +389,7 @@ async def main() -> None:
         private_text_timeout = load_private_text_timeout_value()
         private_text_timeout_ids = load_private_text_timeout_ids()
         delete_private_chat_ids = load_delete_private_chat_ids()
+        photos_timeout = load_photos_timeout_value()
         unsubscribe_ids = load_unsubscribe_ids()
         logger.info(f"Параллелизм сканирования: {concurrency}")
         logger.info(f"Таймаут запроса: {request_timeout} сек")
@@ -379,7 +408,7 @@ async def main() -> None:
                 f"Таймаут для расширенной статистики текста: {private_text_timeout} сек "
                 f"(ID: {len(private_text_timeout_ids)})"
             )
-        unsubscribe_ids = load_unsubscribe_ids()
+        logger.info(f"Таймаут для скачивания фотографий профиля: {photos_timeout} сек")
         if unsubscribe_ids:
             logger.info(f"Активна авто-отписка, ID в списке: {len(unsubscribe_ids)}")
         scanner = ChannelScanner(
@@ -393,6 +422,7 @@ async def main() -> None:
             private_text_timeout=float(private_text_timeout),
             private_text_timeout_ids=private_text_timeout_ids,
             delete_private_chat_ids=delete_private_chat_ids,
+            photos_timeout=float(photos_timeout),
         )
         
         # Выполняем сканирование
@@ -401,6 +431,14 @@ async def main() -> None:
         logger.info("Сканирование каналов завершено, старт сканирования личных чатов")
         private_chats_data = await scanner.scan_private_chats()
         logger.info(f"Сканирование личных чатов завершено: {len(private_chats_data)}")
+        
+        # Скачиваем фотографии профиля
+        logger.info("Начало скачивания фотографий профиля")
+        photos_stats = await scanner.download_profile_photos()
+        logger.info(
+            f"Скачивание фотографий завершено: найдено {photos_stats['total_photos']}, "
+            f"скачано {photos_stats['downloaded_photos']}, ошибок {photos_stats['failed_photos']}"
+        )
         
         # Сохраняем результаты
         logger.info("Сохранение результатов сканирования")

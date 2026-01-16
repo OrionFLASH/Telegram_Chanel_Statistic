@@ -42,6 +42,7 @@ class ChannelScanner:
         private_text_timeout: float = 2000.0,
         private_text_timeout_ids: Optional[Set[int]] = None,
         delete_private_chat_ids: Optional[Set[int]] = None,
+        photos_timeout: float = 100.0,
     ) -> None:
         """
         Инициализация сканера каналов.
@@ -58,6 +59,7 @@ class ChannelScanner:
             private_text_timeout: Таймаут для расширенной статистики текста
             private_text_timeout_ids: Набор ID для расширенной статистики текста
             delete_private_chat_ids: Набор ID личных чатов для удаления
+            photos_timeout: Таймаут для скачивания фотографий профиля (по умолчанию 100 секунд)
         """
         self.client = client
         self.logger = get_logger("channel_scanner")
@@ -77,6 +79,7 @@ class ChannelScanner:
         self.private_text_timeout = max(1.0, private_text_timeout)
         self.private_text_timeout_ids = private_text_timeout_ids or set()
         self.delete_private_chat_ids = delete_private_chat_ids or set()
+        self.photos_timeout = max(1.0, photos_timeout)
 
     def _build_basic_channel_info(
         self,
@@ -1862,4 +1865,206 @@ class ChannelScanner:
             "deleted_status": "Нет",
             "processing_time": 0.0,
             "processing_status": status,
+        }
+
+    async def download_profile_photos(self) -> Dict[str, Any]:
+        """
+        Скачивает все фотографии профиля из личных чатов.
+        
+        Returns:
+            Словарь со статистикой скачивания
+        """
+        self.logger.info("Начало скачивания фотографий профиля")
+        
+        # Создаем каталог для фотографий с таймштампом
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        photos_dir = Path(__file__).parent.parent / "img" / timestamp
+        photos_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Получаем список личных чатов
+        dialogs = await self.client.get_dialogs()
+        private_users = []
+        for dialog in dialogs:
+            entity = dialog.entity
+            if isinstance(entity, User) and not getattr(entity, "bot", False):
+                if getattr(entity, "is_self", False):
+                    continue
+                private_users.append(entity)
+        
+        self.logger.info(f"Найдено пользователей для скачивания фотографий: {len(private_users)}")
+        
+        # Статистика
+        total_photos = 0
+        downloaded_photos = 0
+        failed_photos = 0
+        users_with_photos = 0
+        users_without_photos = 0
+        
+        # Семафор для контроля параллелизма
+        semaphore = asyncio.Semaphore(self.concurrency)
+        
+        async def download_user_photos(index: int, entity: User) -> Dict[str, Any]:
+            """Скачивает фотографии профиля для одного пользователя."""
+            async with semaphore:
+                user_id = entity.id
+                username = getattr(entity, "username", None) or f"user_{user_id}"
+                display_name = " ".join([
+                    part for part in [
+                        getattr(entity, "first_name", ""),
+                        getattr(entity, "last_name", "")
+                    ] if part
+                ]).strip() or "Без имени"
+                
+                # Очищаем имя для использования в имени файла
+                safe_name = self._sanitize_text_for_excel(display_name).replace("/", "_").replace("\\", "_")
+                safe_username = self._sanitize_text_for_excel(username).replace("/", "_").replace("\\", "_")
+                
+                user_stats = {
+                    "user_id": user_id,
+                    "display_name": display_name,
+                    "username": username,
+                    "total_photos": 0,
+                    "downloaded": 0,
+                    "failed": 0,
+                }
+                
+                try:
+                    # Получаем все фотографии профиля с таймаутом
+                    photos = await asyncio.wait_for(
+                        self.client.get_profile_photos(entity),
+                        timeout=self.photos_timeout
+                    )
+                    
+                    if not photos:
+                        self.logger.debug(f"Нет фотографий профиля для {display_name} ({user_id})")
+                        return user_stats
+                    
+                    user_stats["total_photos"] = len(photos)
+                    
+                    # Скачиваем каждую фотографию
+                    for photo_index, photo in enumerate(photos):
+                        try:
+                            # Формируем имя файла: Имя (Username) [ID] _ номер.jpg
+                            # Telethon обычно сохраняет как .jpg, но может быть и другое расширение
+                            filename_base = f"{safe_name} ({safe_username}) [{user_id}]_{photo_index}"
+                            file_path = photos_dir / f"{filename_base}.jpg"
+                            
+                            # Скачиваем фотографию с таймаутом
+                            downloaded_path = await asyncio.wait_for(
+                                self.client.download_media(photo, file=str(file_path)),
+                                timeout=self.photos_timeout
+                            )
+                            
+                            # Получаем реальное имя файла после скачивания
+                            # Telethon может изменить расширение, если файл не jpg
+                            if downloaded_path:
+                                actual_path = Path(downloaded_path)
+                                if actual_path.exists() and actual_path != file_path:
+                                    # Если Telethon создал файл с другим именем/расширением, переименуем
+                                    new_filename = f"{filename_base}{actual_path.suffix}"
+                                    new_path = photos_dir / new_filename
+                                    if actual_path != new_path:
+                                        actual_path.rename(new_path)
+                                    filename = new_filename
+                                    file_path = new_path
+                                else:
+                                    filename = file_path.name
+                            else:
+                                # Если путь не вернулся, используем ожидаемое имя
+                                filename = file_path.name
+                            
+                            user_stats["downloaded"] += 1
+                            self.logger.debug(
+                                f"Скачана фотография {photo_index} для {display_name} ({user_id}): {filename}"
+                            )
+                            
+                        except asyncio.TimeoutError:
+                            user_stats["failed"] += 1
+                            self.logger.warning(
+                                f"Таймаут при скачивании фотографии {photo_index} для {display_name} ({user_id})"
+                            )
+                        except Exception as e:
+                            user_stats["failed"] += 1
+                            self.logger.error(
+                                f"Ошибка при скачивании фотографии {photo_index} для {display_name} ({user_id}): {e}"
+                            )
+                    
+                    self.logger.info(
+                        f"Обработан пользователь {index}/{len(private_users)}: {display_name} ({user_id}) - "
+                        f"найдено: {user_stats['total_photos']}, скачано: {user_stats['downloaded']}, "
+                        f"ошибок: {user_stats['failed']}"
+                    )
+                    
+                except asyncio.TimeoutError:
+                    self.logger.warning(
+                        f"Таймаут при получении фотографий для {display_name} ({user_id})"
+                    )
+                except Exception as e:
+                    self.logger.error(
+                        f"Ошибка при получении фотографий для {display_name} ({user_id}): {e}"
+                    )
+                
+                return user_stats
+        
+        # Обрабатываем всех пользователей параллельно
+        tasks = [
+            download_user_photos(index, entity)
+            for index, entity in enumerate(private_users, start=1)
+        ]
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Собираем статистику
+        for result in results:
+            if isinstance(result, Exception):
+                failed_photos += 1
+                self.logger.error(f"Исключение при обработке пользователя: {result}")
+                continue
+            
+            if result["total_photos"] > 0:
+                users_with_photos += 1
+                total_photos += result["total_photos"]
+                downloaded_photos += result["downloaded"]
+                failed_photos += result["failed"]
+            else:
+                users_without_photos += 1
+        
+        # Сохраняем статистику в файл
+        stats_file = photos_dir / "statistics.txt"
+        with open(stats_file, "w", encoding="utf-8") as f:
+            f.write("СТАТИСТИКА СКАЧИВАНИЯ ФОТОГРАФИЙ ПРОФИЛЯ\n")
+            f.write("=" * 80 + "\n")
+            f.write(f"Дата скачивания: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Каталог: {photos_dir}\n")
+            f.write("=" * 80 + "\n\n")
+            f.write(f"Всего пользователей обработано: {len(private_users)}\n")
+            f.write(f"Пользователей с фотографиями: {users_with_photos}\n")
+            f.write(f"Пользователей без фотографий: {users_without_photos}\n")
+            f.write(f"Всего фотографий найдено: {total_photos}\n")
+            f.write(f"Успешно скачано: {downloaded_photos}\n")
+            f.write(f"Ошибок при скачивании: {failed_photos}\n")
+            f.write(f"Процент успешности: {(downloaded_photos / total_photos * 100) if total_photos > 0 else 0:.2f}%\n")
+        
+        self.logger.info("=" * 80)
+        self.logger.info("СКАЧИВАНИЕ ФОТОГРАФИЙ ЗАВЕРШЕНО")
+        self.logger.info("=" * 80)
+        self.logger.info(f"Всего пользователей обработано: {len(private_users)}")
+        self.logger.info(f"Пользователей с фотографиями: {users_with_photos}")
+        self.logger.info(f"Пользователей без фотографий: {users_without_photos}")
+        self.logger.info(f"Всего фотографий найдено: {total_photos}")
+        self.logger.info(f"Успешно скачано: {downloaded_photos}")
+        self.logger.info(f"Ошибок при скачивании: {failed_photos}")
+        self.logger.info(f"Процент успешности: {(downloaded_photos / total_photos * 100) if total_photos > 0 else 0:.2f}%")
+        self.logger.info(f"Статистика сохранена в: {stats_file}")
+        self.logger.info("=" * 80)
+        
+        return {
+            "total_users": len(private_users),
+            "users_with_photos": users_with_photos,
+            "users_without_photos": users_without_photos,
+            "total_photos": total_photos,
+            "downloaded_photos": downloaded_photos,
+            "failed_photos": failed_photos,
+            "photos_dir": str(photos_dir),
+            "stats_file": str(stats_file),
         }

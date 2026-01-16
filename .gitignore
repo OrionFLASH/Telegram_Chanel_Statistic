@@ -11,6 +11,10 @@ ENV/
 log/
 *.log
 
+# Результаты работы
+OUT/
+img/
+
 # Python
 __pycache__/
 *.py[cod]
