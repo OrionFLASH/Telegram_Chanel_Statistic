@@ -404,7 +404,8 @@ async def main() -> None:
         
         # Сохраняем результаты
         logger.info("Сохранение результатов сканирования")
-        scanner.save_to_xlsx("channels_data.xlsx")
+        output_file = scanner.save_to_xlsx("channels_data.xlsx")
+        output_filename = output_file.split("/")[-1] if "/" in output_file else output_file.split("\\")[-1]
         
         # Выводим статистику
         logger.info("=" * 80)
@@ -412,7 +413,7 @@ async def main() -> None:
         logger.info("=" * 80)
         logger.info(f"Всего найдено каналов и групп: {len(channels_data)}")
         
-        # Подсчитываем статистику
+        # Подсчитываем статистику по каналам
         channels_count = sum(1 for ch in channels_data if ch['is_broadcast'])
         groups_count = sum(1 for ch in channels_data if not ch['is_broadcast'])
         public_count = sum(1 for ch in channels_data if ch['is_public'])
@@ -422,9 +423,38 @@ async def main() -> None:
         logger.info(f"  - Групп: {groups_count}")
         logger.info(f"  - Публичных: {public_count}")
         logger.info(f"  - Приватных: {private_count}")
+        
+        # Подсчитываем статистику по личным чатам
+        logger.info("=" * 80)
+        logger.info(f"Всего найдено личных чатов: {len(private_chats_data)}")
+        
+        if private_chats_data:
+            # Статистика по личным чатам
+            total_messages = sum(chat.get("messages_total", 0) or 0 for chat in private_chats_data)
+            total_messages_365 = sum(chat.get("messages_365", 0) or 0 for chat in private_chats_data)
+            total_messages_30 = sum(chat.get("messages_30", 0) or 0 for chat in private_chats_data)
+            total_messages_from_me = sum(chat.get("messages_from_me", 0) or 0 for chat in private_chats_data)
+            total_messages_from_other = sum(chat.get("messages_from_other", 0) or 0 for chat in private_chats_data)
+            
+            bots_count = sum(1 for chat in private_chats_data if chat.get("is_bot") == "Да")
+            verified_count = sum(1 for chat in private_chats_data if chat.get("is_verified") == "Да")
+            premium_count = sum(1 for chat in private_chats_data if chat.get("is_premium") == "Да")
+            deleted_count = sum(1 for chat in private_chats_data if chat.get("deleted_status") == "Да")
+            
+            logger.info(f"  - Всего сообщений: {total_messages:,}")
+            logger.info(f"  - Сообщений за последние 365 дней: {total_messages_365:,}")
+            logger.info(f"  - Сообщений за последние 30 дней: {total_messages_30:,}")
+            logger.info(f"  - Сообщений от вас: {total_messages_from_me:,}")
+            logger.info(f"  - Сообщений от собеседников: {total_messages_from_other:,}")
+            logger.info(f"  - Ботов: {bots_count}")
+            logger.info(f"  - Верифицированных: {verified_count}")
+            logger.info(f"  - Premium: {premium_count}")
+            if deleted_count > 0:
+                logger.info(f"  - Удалено чатов: {deleted_count}")
+        
         logger.info("=" * 80)
         logger.info("Результаты сохранены в файлы:")
-        logger.info("  - channels_data.xlsx (Excel формат)")
+        logger.info(f"  - {output_filename} (Excel формат)")
         logger.info("=" * 80)
         
         # Закрываем клиент

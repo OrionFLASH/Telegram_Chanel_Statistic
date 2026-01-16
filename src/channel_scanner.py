@@ -1122,7 +1122,7 @@ class ChannelScanner:
             adjusted = min(max(max_len + 2, 12), 60)
             worksheet.set_column(col_idx, col_idx, adjusted)
 
-    def save_to_xlsx(self, filename: str = "channels_data.xlsx") -> None:
+    def save_to_xlsx(self, filename: str = "channels_data.xlsx") -> str:
         """
         Сохраняет данные о каналах в XLSX файл с удобным форматированием.
         
@@ -1191,6 +1191,7 @@ class ChannelScanner:
             )
             workbook.close()
             self.logger.info(f"XLSX отчет сохранен в файл: {output_path}")
+            return str(output_path)
         except Exception as e:
             self.logger.error(f"Ошибка при сохранении XLSX файла: {e}")
             raise
