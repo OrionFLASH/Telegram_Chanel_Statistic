@@ -1161,11 +1161,8 @@ class ChannelScanner:
             
             # Формируем numeric_formats в зависимости от наличия ID для подсчета текста
             private_numeric_formats = {
-                "Сообщений за 90 дней": "#,##0",
-                "Среднее в день": "#,##0.00",
-                "Среднее в неделю": "#,##0.00",
-                "Среднее в месяц": "#,##0.00",
-                "Сообщений за год": "#,##0",
+                "Сообщений за последние 365 дней": "#,##0",
+                "Сообщений за последние 30 дней": "#,##0",
                 "Сообщений всего": "#,##0",
                 "Сообщений от вас": "#,##0",
                 "Сообщений от собеседника": "#,##0",
@@ -1384,10 +1381,10 @@ class ChannelScanner:
                 part for part in [getattr(entity, "first_name", ""), getattr(entity, "last_name", "")] if part
             ).strip() or "Без имени"
             now = datetime.now(timezone.utc)
-            threshold_90 = now - timedelta(days=90)
-            threshold_year = now - timedelta(days=365)
-            messages_90 = 0
-            messages_year = 0
+            threshold_30 = now - timedelta(days=30)
+            threshold_365 = now - timedelta(days=365)
+            messages_30 = 0
+            messages_365 = 0
             messages_total = 0
             messages_from_me = 0
             messages_from_other = 0
@@ -1484,10 +1481,10 @@ class ChannelScanner:
                         else:
                             words_from_other += word_count
                             chars_from_other += char_count
-                if message_date >= threshold_year:
-                    messages_year += 1
-                if message_date >= threshold_90:
-                    messages_90 += 1
+                if message_date >= threshold_365:
+                    messages_365 += 1
+                if message_date >= threshold_30:
+                    messages_30 += 1
                 if messages_total % 2000 == 0:
                     elapsed = monotonic() - last_progress
                     last_progress = monotonic()
@@ -1496,9 +1493,6 @@ class ChannelScanner:
                         f"(за {elapsed:.1f} сек)"
                     )
 
-            average_per_day = round(messages_90 / 90, 2)
-            average_per_week = round(messages_90 / (90 / 7), 2)
-            average_per_month = round(messages_90 / 3, 2)
 
             # Получаем результат параллельной задачи получения информации о пользователе
             about = None
@@ -1611,11 +1605,8 @@ class ChannelScanner:
                 "last_text_from_other": last_text_from_other or "",
                 "last_system_message": last_system_message or "",
                 "last_message_type": self._sanitize_text_for_excel(last_message_type_str),
-                "messages_90": messages_90,
-                "avg_day": average_per_day,
-                "avg_week": average_per_week,
-                "avg_month": average_per_month,
-                "messages_year": messages_year,
+                "messages_30": messages_30,
+                "messages_365": messages_365,
                 "messages_total": messages_total,
                 "messages_from_me": messages_from_me,
                 "messages_from_other": messages_from_other,
@@ -1663,11 +1654,8 @@ class ChannelScanner:
             "Последнее сообщение от собеседника",
             "Последнее системное сообщение",
             "Тип последнего сообщения",
-            "Сообщений за 90 дней",
-            "Среднее в день",
-            "Среднее в неделю",
-            "Среднее в месяц",
-            "Сообщений за год",
+            "Сообщений за последние 365 дней",
+            "Сообщений за последние 30 дней",
             "Сообщений всего",
             "Сообщений от вас",
             "Сообщений от собеседника",
@@ -1716,11 +1704,8 @@ class ChannelScanner:
                 self._sanitize_text_for_excel(chat.get("last_text_from_other", "")),
                 self._sanitize_text_for_excel(chat.get("last_system_message", "")),
                 self._sanitize_text_for_excel(chat.get("last_message_type", "")),
-                int(chat.get("messages_90", 0)),
-                float(chat.get("avg_day", 0.0)),
-                float(chat.get("avg_week", 0.0)),
-                float(chat.get("avg_month", 0.0)),
-                int(chat.get("messages_year", 0)),
+                int(chat.get("messages_365", 0)),
+                int(chat.get("messages_30", 0)),
                 int(chat.get("messages_total", 0)),
                 int(chat.get("messages_from_me", 0)),
                 int(chat.get("messages_from_other", 0)),
@@ -1851,11 +1836,8 @@ class ChannelScanner:
             "last_text_from_other": "",
             "last_system_message": "",
             "last_message_type": "",
-            "messages_90": 0,
-            "avg_day": 0.0,
-            "avg_week": 0.0,
-            "avg_month": 0.0,
-            "messages_year": 0,
+            "messages_30": 0,
+            "messages_365": 0,
             "messages_total": 0,
             "messages_from_me": 0,
             "messages_from_other": 0,
