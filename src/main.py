@@ -308,6 +308,60 @@ def load_photos_timeout_value(default_value: float = 100.0) -> float:
         return default_value
 
 
+def load_photos_timeout_ids() -> set:
+    """
+    Загружает список ID личных чатов для отдельного таймаута при скачивании фотографий из .env.
+    
+    Returns:
+        Набор ID личных чатов
+    """
+    logger = setup_logger("main")
+    raw_value = os.getenv("TELEGRAM_PHOTOS_TIMEOUT_IDS", "").strip()
+    if not raw_value:
+        return set()
+    ids: set = set()
+    for item in raw_value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            ids.add(int(item))
+        except ValueError as exc:
+            logger.warning(
+                f"Некорректный ID в TELEGRAM_PHOTOS_TIMEOUT_IDS: '{item}', пропуск"
+            )
+            logger.debug(f"Детали ошибки разбора ID: {exc}")
+    return ids
+
+
+def load_photos_long_timeout_value(default_value: float = 300.0) -> float:
+    """
+    Загружает большой таймаут для скачивания фотографий профиля (для пользователей с большим количеством фото).
+    
+    Args:
+        default_value: Значение по умолчанию в секундах
+    
+    Returns:
+        Большой таймаут для скачивания фотографий в секундах
+    """
+    logger = setup_logger("main")
+    timeout_raw = os.getenv("TELEGRAM_PHOTOS_LONG_TIMEOUT", "").strip()
+    if not timeout_raw:
+        return default_value
+    try:
+        timeout_value = float(timeout_raw)
+        if timeout_value <= 0:
+            raise ValueError("Таймаут должен быть положительным числом")
+        return timeout_value
+    except ValueError as exc:
+        logger.warning(
+            f"Некорректное значение TELEGRAM_PHOTOS_LONG_TIMEOUT '{timeout_raw}', "
+            f"используется значение по умолчанию {default_value}"
+        )
+        logger.debug(f"Детали ошибки при разборе TELEGRAM_PHOTOS_LONG_TIMEOUT: {exc}")
+        return default_value
+
+
 async def authenticate_client(client: TelegramClient, phone: str) -> None:
     """
     Выполняет аутентификацию клиента Telegram.
@@ -390,6 +444,8 @@ async def main() -> None:
         private_text_timeout_ids = load_private_text_timeout_ids()
         delete_private_chat_ids = load_delete_private_chat_ids()
         photos_timeout = load_photos_timeout_value()
+        photos_timeout_ids = load_photos_timeout_ids()
+        photos_long_timeout = load_photos_long_timeout_value()
         unsubscribe_ids = load_unsubscribe_ids()
         logger.info(f"Параллелизм сканирования: {concurrency}")
         logger.info(f"Таймаут запроса: {request_timeout} сек")
@@ -409,6 +465,11 @@ async def main() -> None:
                 f"(ID: {len(private_text_timeout_ids)})"
             )
         logger.info(f"Таймаут для скачивания фотографий профиля: {photos_timeout} сек")
+        if photos_timeout_ids:
+            logger.info(
+                f"Большой таймаут для скачивания фотографий: {photos_long_timeout} сек "
+                f"(ID: {len(photos_timeout_ids)})"
+            )
         if unsubscribe_ids:
             logger.info(f"Активна авто-отписка, ID в списке: {len(unsubscribe_ids)}")
         scanner = ChannelScanner(
@@ -423,6 +484,8 @@ async def main() -> None:
             private_text_timeout_ids=private_text_timeout_ids,
             delete_private_chat_ids=delete_private_chat_ids,
             photos_timeout=float(photos_timeout),
+            photos_timeout_ids=photos_timeout_ids,
+            photos_long_timeout=float(photos_long_timeout),
         )
         
         # Выполняем сканирование

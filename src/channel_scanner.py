@@ -43,6 +43,8 @@ class ChannelScanner:
         private_text_timeout_ids: Optional[Set[int]] = None,
         delete_private_chat_ids: Optional[Set[int]] = None,
         photos_timeout: float = 100.0,
+        photos_timeout_ids: Optional[Set[int]] = None,
+        photos_long_timeout: float = 300.0,
     ) -> None:
         """
         Инициализация сканера каналов.
@@ -60,6 +62,8 @@ class ChannelScanner:
             private_text_timeout_ids: Набор ID для расширенной статистики текста
             delete_private_chat_ids: Набор ID личных чатов для удаления
             photos_timeout: Таймаут для скачивания фотографий профиля (по умолчанию 100 секунд)
+            photos_timeout_ids: Набор ID личных чатов для отдельного таймаута при скачивании фотографий
+            photos_long_timeout: Большой таймаут для скачивания фотографий (для пользователей с большим количеством фото, по умолчанию 300 секунд)
         """
         self.client = client
         self.logger = get_logger("channel_scanner")
@@ -80,6 +84,8 @@ class ChannelScanner:
         self.private_text_timeout_ids = private_text_timeout_ids or set()
         self.delete_private_chat_ids = delete_private_chat_ids or set()
         self.photos_timeout = max(1.0, photos_timeout)
+        self.photos_timeout_ids = photos_timeout_ids or set()
+        self.photos_long_timeout = max(1.0, photos_long_timeout)
 
     def _build_basic_channel_info(
         self,
@@ -1929,10 +1935,16 @@ class ChannelScanner:
                 }
                 
                 try:
+                    # Определяем таймаут для этого пользователя
+                    if entity.id in self.photos_timeout_ids:
+                        timeout_value = self.photos_long_timeout
+                    else:
+                        timeout_value = self.photos_timeout
+                    
                     # Получаем все фотографии профиля с таймаутом
                     photos = await asyncio.wait_for(
                         self.client.get_profile_photos(entity),
-                        timeout=self.photos_timeout
+                        timeout=timeout_value
                     )
                     
                     if not photos:
@@ -1949,10 +1961,10 @@ class ChannelScanner:
                             filename_base = f"{safe_name} ({safe_username}) [{user_id}]_{photo_index}"
                             file_path = photos_dir / f"{filename_base}.jpg"
                             
-                            # Скачиваем фотографию с таймаутом
+                            # Скачиваем фотографию с таймаутом (используем тот же таймаут, что и для получения списка)
                             downloaded_path = await asyncio.wait_for(
                                 self.client.download_media(photo, file=str(file_path)),
-                                timeout=self.photos_timeout
+                                timeout=timeout_value
                             )
                             
                             # Получаем реальное имя файла после скачивания
