@@ -362,6 +362,88 @@ def load_photos_long_timeout_value(default_value: float = 300.0) -> float:
         return default_value
 
 
+def load_stories_timeout_value(default_value: float = 100.0) -> float:
+    """
+    Загружает таймаут для скачивания историй (stories).
+    
+    Args:
+        default_value: Значение по умолчанию в секундах
+    
+    Returns:
+        Таймаут для скачивания историй в секундах
+    """
+    logger = setup_logger("main")
+    timeout_raw = os.getenv("TELEGRAM_STORIES_TIMEOUT", "").strip()
+    if not timeout_raw:
+        return default_value
+    try:
+        timeout_value = float(timeout_raw)
+        if timeout_value <= 0:
+            raise ValueError("Таймаут должен быть положительным числом")
+        return timeout_value
+    except ValueError as exc:
+        logger.warning(
+            f"Некорректное значение TELEGRAM_STORIES_TIMEOUT '{timeout_raw}', "
+            f"используется значение по умолчанию {default_value}"
+        )
+        logger.debug(f"Детали ошибки при разборе TELEGRAM_STORIES_TIMEOUT: {exc}")
+        return default_value
+
+
+def load_stories_timeout_ids() -> set:
+    """
+    Загружает список ID личных чатов для отдельного таймаута при скачивании историй из .env.
+    
+    Returns:
+        Набор ID личных чатов
+    """
+    logger = setup_logger("main")
+    raw_value = os.getenv("TELEGRAM_STORIES_TIMEOUT_IDS", "").strip()
+    if not raw_value:
+        return set()
+    ids: set = set()
+    for item in raw_value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            ids.add(int(item))
+        except ValueError as exc:
+            logger.warning(
+                f"Некорректный ID в TELEGRAM_STORIES_TIMEOUT_IDS: '{item}', пропуск"
+            )
+            logger.debug(f"Детали ошибки разбора ID: {exc}")
+    return ids
+
+
+def load_stories_long_timeout_value(default_value: float = 300.0) -> float:
+    """
+    Загружает большой таймаут для скачивания историй (для пользователей с большим количеством историй).
+    
+    Args:
+        default_value: Значение по умолчанию в секундах
+    
+    Returns:
+        Большой таймаут для скачивания историй в секундах
+    """
+    logger = setup_logger("main")
+    timeout_raw = os.getenv("TELEGRAM_STORIES_LONG_TIMEOUT", "").strip()
+    if not timeout_raw:
+        return default_value
+    try:
+        timeout_value = float(timeout_raw)
+        if timeout_value <= 0:
+            raise ValueError("Таймаут должен быть положительным числом")
+        return timeout_value
+    except ValueError as exc:
+        logger.warning(
+            f"Некорректное значение TELEGRAM_STORIES_LONG_TIMEOUT '{timeout_raw}', "
+            f"используется значение по умолчанию {default_value}"
+        )
+        logger.debug(f"Детали ошибки при разборе TELEGRAM_STORIES_LONG_TIMEOUT: {exc}")
+        return default_value
+
+
 async def authenticate_client(client: TelegramClient, phone: str) -> None:
     """
     Выполняет аутентификацию клиента Telegram.
@@ -446,6 +528,9 @@ async def main() -> None:
         photos_timeout = load_photos_timeout_value()
         photos_timeout_ids = load_photos_timeout_ids()
         photos_long_timeout = load_photos_long_timeout_value()
+        stories_timeout = load_stories_timeout_value()
+        stories_timeout_ids = load_stories_timeout_ids()
+        stories_long_timeout = load_stories_long_timeout_value()
         unsubscribe_ids = load_unsubscribe_ids()
         logger.info(f"Параллелизм сканирования: {concurrency}")
         logger.info(f"Таймаут запроса: {request_timeout} сек")
@@ -470,6 +555,12 @@ async def main() -> None:
                 f"Большой таймаут для скачивания фотографий: {photos_long_timeout} сек "
                 f"(ID: {len(photos_timeout_ids)})"
             )
+        logger.info(f"Таймаут для скачивания историй: {stories_timeout} сек")
+        if stories_timeout_ids:
+            logger.info(
+                f"Большой таймаут для скачивания историй: {stories_long_timeout} сек "
+                f"(ID: {len(stories_timeout_ids)})"
+            )
         if unsubscribe_ids:
             logger.info(f"Активна авто-отписка, ID в списке: {len(unsubscribe_ids)}")
         scanner = ChannelScanner(
@@ -486,6 +577,9 @@ async def main() -> None:
             photos_timeout=float(photos_timeout),
             photos_timeout_ids=photos_timeout_ids,
             photos_long_timeout=float(photos_long_timeout),
+            stories_timeout=float(stories_timeout),
+            stories_timeout_ids=stories_timeout_ids,
+            stories_long_timeout=float(stories_long_timeout),
         )
         
         # Выполняем сканирование
@@ -499,8 +593,16 @@ async def main() -> None:
         logger.info("Начало скачивания фотографий профиля")
         photos_stats = await scanner.download_profile_photos()
         logger.info(
-            f"Скачивание фотографий завершено: найдено {photos_stats['total_photos']}, "
-            f"скачано {photos_stats['downloaded_photos']}, ошибок {photos_stats['failed_photos']}"
+            f"Скачивание фотографий завершено: найдено {photos_stats.get('total_photos', 0)}, "
+            f"скачано {photos_stats.get('downloaded_photos', 0)}, ошибок {photos_stats.get('failed_photos', 0)}"
+        )
+        
+        # Скачиваем истории
+        logger.info("Начало скачивания историй")
+        stories_stats = await scanner.download_stories()
+        logger.info(
+            f"Скачивание историй завершено: найдено {stories_stats.get('total_stories', 0)}, "
+            f"скачано {stories_stats.get('downloaded', 0)}, ошибок {stories_stats.get('failed', 0)}"
         )
         
         # Сохраняем результаты

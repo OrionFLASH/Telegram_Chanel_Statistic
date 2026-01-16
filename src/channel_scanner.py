@@ -45,6 +45,9 @@ class ChannelScanner:
         photos_timeout: float = 100.0,
         photos_timeout_ids: Optional[Set[int]] = None,
         photos_long_timeout: float = 300.0,
+        stories_timeout: float = 100.0,
+        stories_timeout_ids: Optional[Set[int]] = None,
+        stories_long_timeout: float = 300.0,
     ) -> None:
         """
         Инициализация сканера каналов.
@@ -64,6 +67,9 @@ class ChannelScanner:
             photos_timeout: Таймаут для скачивания фотографий профиля (по умолчанию 100 секунд)
             photos_timeout_ids: Набор ID личных чатов для отдельного таймаута при скачивании фотографий
             photos_long_timeout: Большой таймаут для скачивания фотографий (для пользователей с большим количеством фото, по умолчанию 300 секунд)
+            stories_timeout: Таймаут для скачивания историй (по умолчанию 100 секунд)
+            stories_timeout_ids: Набор ID личных чатов для отдельного таймаута при скачивании историй
+            stories_long_timeout: Большой таймаут для скачивания историй (для пользователей с большим количеством историй, по умолчанию 300 секунд)
         """
         self.client = client
         self.logger = get_logger("channel_scanner")
@@ -86,6 +92,11 @@ class ChannelScanner:
         self.photos_timeout = max(1.0, photos_timeout)
         self.photos_timeout_ids = photos_timeout_ids or set()
         self.photos_long_timeout = max(1.0, photos_long_timeout)
+        self.stories_timeout = max(1.0, stories_timeout)
+        self.stories_timeout_ids = stories_timeout_ids or set()
+        self.stories_long_timeout = max(1.0, stories_long_timeout)
+        # Словарь для хранения статистики по фото и историям для каждого пользователя
+        self.user_media_stats: Dict[int, Dict[str, Any]] = {}
 
     def _build_basic_channel_info(
         self,
@@ -2001,6 +2012,13 @@ class ChannelScanner:
                                 f"Ошибка при скачивании фотографии {photo_index} для {display_name} ({user_id}): {e}"
                             )
                     
+                    # Сохраняем статистику для этого пользователя
+                    if user_id not in self.user_media_stats:
+                        self.user_media_stats[user_id] = {}
+                    self.user_media_stats[user_id]["photos_total"] = user_stats["total_photos"]
+                    self.user_media_stats[user_id]["photos_downloaded"] = user_stats["downloaded"]
+                    self.user_media_stats[user_id]["photos_failed"] = user_stats["failed"]
+                    
                     self.logger.info(
                         f"Обработан пользователь {index}/{len(private_users)}: {display_name} ({user_id}) - "
                         f"найдено: {user_stats['total_photos']}, скачано: {user_stats['downloaded']}, "
@@ -2078,5 +2096,231 @@ class ChannelScanner:
             "downloaded_photos": downloaded_photos,
             "failed_photos": failed_photos,
             "photos_dir": str(photos_dir),
+            "stats_file": str(stats_file),
+        }
+    
+    async def download_stories(self) -> Dict[str, Any]:
+        """
+        Скачивает все доступные истории (stories) из личных чатов.
+        
+        Returns:
+            Словарь со статистикой скачивания
+        """
+        self.logger.info("Начало скачивания историй")
+        
+        # Создаем каталог для историй с таймштампом
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        stories_dir = Path(__file__).parent.parent / "img_history" / timestamp
+        stories_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Получаем список личных чатов
+        dialogs = await self.client.get_dialogs()
+        private_users = []
+        for dialog in dialogs:
+            entity = dialog.entity
+            if isinstance(entity, User) and not getattr(entity, "bot", False):
+                if getattr(entity, "is_self", False):
+                    continue
+                private_users.append(entity)
+        
+        self.logger.info(f"Найдено пользователей для скачивания историй: {len(private_users)}")
+        
+        # Статистика
+        total_stories = 0
+        downloaded_stories = 0
+        failed_stories = 0
+        users_with_stories = 0
+        users_without_stories = 0
+        
+        # Семафор для контроля параллелизма
+        semaphore = asyncio.Semaphore(self.concurrency)
+        
+        async def download_user_stories(index: int, entity: User) -> Dict[str, Any]:
+            """Скачивает истории для одного пользователя."""
+            async with semaphore:
+                user_id = entity.id
+                username = getattr(entity, "username", None) or f"user_{user_id}"
+                display_name = " ".join([
+                    part for part in [
+                        getattr(entity, "first_name", ""),
+                        getattr(entity, "last_name", "")
+                    ] if part
+                ]).strip() or "Без имени"
+                
+                # Очищаем имя для использования в имени файла
+                safe_name = self._sanitize_text_for_excel(display_name).replace("/", "_").replace("\\", "_")
+                safe_username = self._sanitize_text_for_excel(username).replace("/", "_").replace("\\", "_")
+                
+                user_stats = {
+                    "user_id": user_id,
+                    "display_name": display_name,
+                    "username": username,
+                    "total_stories": 0,
+                    "downloaded": 0,
+                    "failed": 0,
+                }
+                
+                try:
+                    # Определяем таймаут для этого пользователя
+                    if entity.id in self.stories_timeout_ids:
+                        timeout_value = self.stories_long_timeout
+                    else:
+                        timeout_value = self.stories_timeout
+                    
+                    # Получаем истории пользователя через GetPeerStoriesRequest
+                    try:
+                        peer_stories = await asyncio.wait_for(
+                            self.client(functions.stories.GetPeerStoriesRequest(
+                                peer=entity
+                            )),
+                            timeout=timeout_value
+                        )
+                    except Exception as e:
+                        # Если нет доступа к историям или их нет
+                        self.logger.debug(
+                            f"Не удалось получить истории для {display_name} ({user_id}): {e} "
+                            f"[class: ChannelScanner | def: download_stories]"
+                        )
+                        return user_stats
+                    
+                    if not peer_stories or not hasattr(peer_stories, "stories") or not peer_stories.stories:
+                        self.logger.debug(f"Нет историй для {display_name} ({user_id})")
+                        return user_stats
+                    
+                    stories_list = peer_stories.stories.stories if hasattr(peer_stories.stories, "stories") else []
+                    if not stories_list:
+                        self.logger.debug(f"Нет активных историй для {display_name} ({user_id})")
+                        return user_stats
+                    
+                    user_stats["total_stories"] = len(stories_list)
+                    
+                    # Скачиваем каждую историю
+                    for story_index, story in enumerate(stories_list):
+                        try:
+                            # Проверяем наличие медиа в истории
+                            if not hasattr(story, "media") or not story.media:
+                                continue
+                            
+                            # Определяем расширение файла в зависимости от типа медиа
+                            file_ext = ".jpg"  # По умолчанию
+                            if hasattr(story.media, "photo"):
+                                file_ext = ".jpg"
+                            elif hasattr(story.media, "document"):
+                                # Для видео и других документов
+                                if hasattr(story.media.document, "mime_type"):
+                                    mime = story.media.document.mime_type
+                                    if "video" in mime:
+                                        file_ext = ".mp4"
+                                    elif "image" in mime:
+                                        file_ext = ".jpg"
+                                    else:
+                                        file_ext = ".bin"
+                            
+                            # Формируем имя файла: Имя (Username) [ID]_номер.расширение
+                            filename_base = f"{safe_name} ({safe_username}) [{user_id}]_{story_index}"
+                            file_path = stories_dir / f"{filename_base}{file_ext}"
+                            
+                            # Скачиваем медиа истории с таймаутом
+                            downloaded_path = await asyncio.wait_for(
+                                self.client.download_media(story.media, file=str(file_path)),
+                                timeout=timeout_value
+                            )
+                            
+                            # Получаем реальное имя файла после скачивания
+                            if downloaded_path:
+                                actual_path = Path(downloaded_path)
+                                if actual_path.exists() and actual_path != file_path:
+                                    # Если Telethon создал файл с другим именем/расширением, переименуем
+                                    new_filename = f"{filename_base}{actual_path.suffix}"
+                                    new_path = stories_dir / new_filename
+                                    if actual_path != new_path:
+                                        actual_path.rename(new_path)
+                                
+                                user_stats["downloaded"] += 1
+                                self.logger.debug(
+                                    f"Скачана история {story_index} для {display_name} ({user_id}) "
+                                    f"[class: ChannelScanner | def: download_stories]"
+                                )
+                            else:
+                                user_stats["failed"] += 1
+                                self.logger.warning(
+                                    f"Не удалось скачать историю {story_index} для {display_name} ({user_id})"
+                                )
+                        except asyncio.TimeoutError:
+                            user_stats["failed"] += 1
+                            self.logger.warning(
+                                f"Таймаут при скачивании истории {story_index} для {display_name} ({user_id})"
+                            )
+                        except Exception as e:
+                            user_stats["failed"] += 1
+                            self.logger.warning(
+                                f"Ошибка при скачивании истории {story_index} для {display_name} ({user_id}): {e}"
+                            )
+                    
+                    # Сохраняем статистику для этого пользователя
+                    if user_id not in self.user_media_stats:
+                        self.user_media_stats[user_id] = {}
+                    self.user_media_stats[user_id]["stories_total"] = user_stats["total_stories"]
+                    self.user_media_stats[user_id]["stories_downloaded"] = user_stats["downloaded"]
+                    self.user_media_stats[user_id]["stories_failed"] = user_stats["failed"]
+                    
+                    return user_stats
+                    
+                except asyncio.TimeoutError:
+                    self.logger.warning(f"Таймаут при получении историй для {display_name} ({user_id})")
+                    return user_stats
+                except Exception as e:
+                    self.logger.warning(
+                        f"Ошибка при обработке историй для {display_name} ({user_id}): {e} "
+                        f"[class: ChannelScanner | def: download_stories]"
+                    )
+                    return user_stats
+        
+        # Запускаем параллельное скачивание
+        tasks = [
+            download_user_stories(index, user)
+            for index, user in enumerate(private_users, 1)
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Собираем статистику
+        for result in results:
+            if isinstance(result, dict):
+                total_stories += result.get("total_stories", 0)
+                downloaded_stories += result.get("downloaded", 0)
+                failed_stories += result.get("failed", 0)
+                if result.get("total_stories", 0) > 0:
+                    users_with_stories += 1
+                else:
+                    users_without_stories += 1
+        
+        # Сохраняем статистику в файл
+        stats_file = stories_dir / "statistics.txt"
+        with open(stats_file, "w", encoding="utf-8") as f:
+            f.write(f"Статистика скачивания историй\n")
+            f.write(f"{'=' * 50}\n\n")
+            f.write(f"Всего пользователей обработано: {len(private_users)}\n")
+            f.write(f"Пользователей с историями: {users_with_stories}\n")
+            f.write(f"Пользователей без историй: {users_without_stories}\n")
+            f.write(f"Всего историй найдено: {total_stories}\n")
+            f.write(f"Успешно скачано: {downloaded_stories}\n")
+            f.write(f"Ошибок при скачивании: {failed_stories}\n")
+            if total_stories > 0:
+                success_rate = (downloaded_stories / total_stories) * 100
+                f.write(f"Процент успешности: {success_rate:.2f}%\n")
+        
+        self.logger.info(
+            f"Скачивание историй завершено: найдено {total_stories}, "
+            f"скачано {downloaded_stories}, ошибок {failed_stories}"
+        )
+        
+        return {
+            "total_users": len(private_users),
+            "users_with_stories": users_with_stories,
+            "users_without_stories": users_without_stories,
+            "total_stories": total_stories,
+            "downloaded": downloaded_stories,
+            "failed": failed_stories,
+            "stories_dir": str(stories_dir),
             "stats_file": str(stats_file),
         }
