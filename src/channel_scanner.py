@@ -1080,7 +1080,8 @@ class ChannelScanner:
                     fmt = numeric_format_cache[format_key]
                 worksheet.write(row_idx, col_idx, value, fmt)
 
-        worksheet.freeze_panes(1, 0)
+        # Закрепляем первые 2 строки (заголовки) и первые 3 колонки (A, B, C) на позиции D2
+        worksheet.freeze_panes(2, 3)
         if rows:
             worksheet.autofilter(0, 0, len(rows), len(headers) - 1)
         else:
