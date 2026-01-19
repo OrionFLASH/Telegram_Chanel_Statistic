@@ -491,19 +491,19 @@ class ChannelScanner:
                 # Дополнительная попытка через подсчет участников (только для групп)
                 if not entity.broadcast:
                     try:
-                        count = 0
+                            count = 0
                         async for _ in self.client.iter_participants(entity, limit=10000):
-                            count += 1
-                            if count >= 10000:  # Ограничение для производительности
-                                break
+                                count += 1
+                                if count >= 10000:  # Ограничение для производительности
+                                    break
                         if count > 0:
                             participants_count = count if count < 10000 else ">10000"
-                    except ChatAdminRequiredError:
+            except ChatAdminRequiredError:
                         self.logger.debug(
                             f"Требуются права администратора для подсчета участников через iter_participants для {entity.id} "
                             f"[class: ChannelScanner | def: get_channel_info]"
                         )
-                    except Exception as e:
+            except Exception as e:
                         self.logger.debug(
                             f"Не удалось получить количество участников через iter_participants для {entity.id}: {e} "
                             f"[class: ChannelScanner | def: get_channel_info]"
@@ -2292,22 +2292,56 @@ class ChannelScanner:
                             # Получаем реальное имя файла после скачивания
                             if downloaded_path:
                                 actual_path = Path(downloaded_path)
-                                if actual_path.exists() and actual_path != file_path:
-                                    # Если Telethon создал файл с другим именем/расширением, переименуем
+                                
+                                # Проверяем, что файл действительно существует
+                                if not actual_path.exists():
+                                    user_stats["failed"] += 1
+                                    self.logger.warning(
+                                        f"Файл не найден после скачивания истории {story_index} для {display_name} ({user_id}): {downloaded_path}"
+                                    )
+                                    continue
+                                
+                                # Если Telethon создал файл с другим именем/расширением, переименуем
+                                final_file_path = file_path
+                                if actual_path != file_path:
                                     new_filename = f"{filename_base}{actual_path.suffix}"
                                     new_path = stories_dir / new_filename
                                     if actual_path != new_path:
-                                        actual_path.rename(new_path)
+                                        try:
+                                            actual_path.rename(new_path)
+                                            self.logger.debug(
+                                                f"Переименован файл истории {story_index} для {display_name} ({user_id}): "
+                                                f"{actual_path.name} -> {new_path.name} "
+                                                f"[class: ChannelScanner | def: download_stories]"
+                                            )
+                                        except Exception as e:
+                                            self.logger.warning(
+                                                f"Не удалось переименовать файл истории {story_index} для {display_name} ({user_id}): {e}"
+                                            )
+                                            # Используем оригинальный путь, если переименование не удалось
+                                            final_file_path = actual_path
+                                    else:
+                                        final_file_path = new_path
+                                else:
+                                    # Файл уже имеет правильное имя
+                                    final_file_path = actual_path
                                 
-                                user_stats["downloaded"] += 1
-                                self.logger.debug(
-                                    f"Скачана история {story_index} для {display_name} ({user_id}) "
-                                    f"[class: ChannelScanner | def: download_stories]"
-                                )
+                                # Финальная проверка: файл должен существовать
+                                if final_file_path.exists():
+                                    user_stats["downloaded"] += 1
+                                    self.logger.info(
+                                        f"Скачана история {story_index} для {display_name} ({user_id}): {final_file_path.name} "
+                                        f"[class: ChannelScanner | def: download_stories]"
+                                    )
+                                else:
+                                    user_stats["failed"] += 1
+                                    self.logger.warning(
+                                        f"Файл истории {story_index} не найден в финальном месте для {display_name} ({user_id}): {final_file_path}"
+                                    )
                             else:
                                 user_stats["failed"] += 1
                                 self.logger.warning(
-                                    f"Не удалось скачать историю {story_index} для {display_name} ({user_id})"
+                                    f"Не удалось скачать историю {story_index} для {display_name} ({user_id}): downloaded_path is None"
                                 )
                         except asyncio.TimeoutError:
                             user_stats["failed"] += 1
