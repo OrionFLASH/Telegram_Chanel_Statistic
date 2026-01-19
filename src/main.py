@@ -452,6 +452,7 @@ def load_work_mode(default_value: str = "full") -> str:
     - "full" - полная обработка (сканирование каналов и чатов, сохранение в Excel, скачивание фото и историй)
     - "stats_only" - только статистика (сканирование каналов и чатов, сохранение в Excel, без скачивания медиа)
     - "photos_only" - только фотографии (минимальное сканирование личных чатов для получения списка пользователей, скачивание фотографий профиля)
+    - "stories_only" - только истории (минимальное сканирование личных чатов для получения списка пользователей, скачивание историй)
     
     Args:
         default_value: Значение по умолчанию
@@ -464,7 +465,7 @@ def load_work_mode(default_value: str = "full") -> str:
     if not mode_raw:
         return default_value
     
-    valid_modes = ["full", "stats_only", "photos_only"]
+    valid_modes = ["full", "stats_only", "photos_only", "stories_only"]
     if mode_raw not in valid_modes:
         logger.warning(
             f"Некорректное значение TELEGRAM_WORK_MODE '{mode_raw}', "
@@ -545,6 +546,8 @@ async def main() -> None:
             logger.info("  → Только статистика: сканирование и сохранение в Excel, без медиа")
         elif work_mode == "photos_only":
             logger.info("  → Только фотографии: минимальное сканирование личных чатов, скачивание фото профиля")
+        elif work_mode == "stories_only":
+            logger.info("  → Только истории: минимальное сканирование личных чатов, скачивание историй")
         
         logger.info("Конфигурация успешно загружена")
         logger.debug(f"API ID: {api_id_int}, Phone: {phone}")
@@ -690,6 +693,21 @@ async def main() -> None:
                 f"скачано {photos_stats.get('downloaded_photos', 0)}, ошибок {photos_stats.get('failed_photos', 0)}"
             )
         
+        elif work_mode == "stories_only":
+            # Только истории: минимальное сканирование личных чатов для получения списка пользователей
+            logger.info("Начало процесса сканирования личных чатов (режим: только истории)")
+            logger.info("Сканирование каналов пропущено (режим: только истории)")
+            private_chats_data = await scanner.scan_private_chats()
+            logger.info(f"Сканирование личных чатов завершено: {len(private_chats_data)}")
+            
+            # Скачиваем только истории
+            logger.info("Начало скачивания историй")
+            stories_stats = await scanner.download_stories()
+            logger.info(
+                f"Скачивание историй завершено: найдено {stories_stats.get('total_stories', 0)}, "
+                f"скачано {stories_stats.get('downloaded', 0)}, ошибок {stories_stats.get('failed', 0)}"
+            )
+        
         # Выводим статистику в зависимости от режима работы
         logger.info("=" * 80)
         logger.info("ОБРАБОТКА ЗАВЕРШЕНА")
@@ -755,6 +773,18 @@ async def main() -> None:
                 logger.info(f"  - Ошибок при скачивании: {photos_stats.get('failed_photos', 0)}")
                 logger.info(f"  - Пользователей с фотографиями: {photos_stats.get('users_with_photos', 0)}")
                 logger.info(f"  - Пользователей без фотографий: {photos_stats.get('users_without_photos', 0)}")
+        
+        elif work_mode == "stories_only":
+            # Статистика только по историям
+            logger.info(f"Всего обработано личных чатов: {len(private_chats_data)}")
+            if stories_stats:
+                logger.info("=" * 80)
+                logger.info("Статистика скачивания историй:")
+                logger.info(f"  - Всего историй найдено: {stories_stats.get('total_stories', 0)}")
+                logger.info(f"  - Успешно скачано: {stories_stats.get('downloaded', 0)}")
+                logger.info(f"  - Ошибок при скачивании: {stories_stats.get('failed', 0)}")
+                logger.info(f"  - Пользователей с историями: {stories_stats.get('users_with_stories', 0)}")
+                logger.info(f"  - Пользователей без историй: {stories_stats.get('users_without_stories', 0)}")
         
         logger.info("=" * 80)
         
