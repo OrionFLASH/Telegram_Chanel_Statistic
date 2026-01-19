@@ -444,6 +444,38 @@ def load_stories_long_timeout_value(default_value: float = 300.0) -> float:
         return default_value
 
 
+def load_work_mode(default_value: str = "full") -> str:
+    """
+    Загружает режим работы программы из переменных окружения.
+    
+    Возможные значения:
+    - "full" - полная обработка (сканирование каналов и чатов, сохранение в Excel, скачивание фото и историй)
+    - "stats_only" - только статистика (сканирование каналов и чатов, сохранение в Excel, без скачивания медиа)
+    - "photos_only" - только фотографии (минимальное сканирование личных чатов для получения списка пользователей, скачивание фотографий профиля)
+    
+    Args:
+        default_value: Значение по умолчанию
+    
+    Returns:
+        Режим работы программы
+    """
+    logger = setup_logger("main")
+    mode_raw = os.getenv("TELEGRAM_WORK_MODE", "").strip().lower()
+    if not mode_raw:
+        return default_value
+    
+    valid_modes = ["full", "stats_only", "photos_only"]
+    if mode_raw not in valid_modes:
+        logger.warning(
+            f"Некорректное значение TELEGRAM_WORK_MODE '{mode_raw}', "
+            f"допустимые значения: {', '.join(valid_modes)}, "
+            f"используется значение по умолчанию '{default_value}'"
+        )
+        return default_value
+    
+    return mode_raw
+
+
 async def authenticate_client(client: TelegramClient, phone: str) -> None:
     """
     Выполняет аутентификацию клиента Telegram.
@@ -503,6 +535,16 @@ async def main() -> None:
         except ValueError:
             logger.error("Ошибка: TELEGRAM_API_ID должен быть числом")
             sys.exit(1)
+        
+        # Загружаем режим работы
+        work_mode = load_work_mode()
+        logger.info(f"Режим работы: {work_mode}")
+        if work_mode == "full":
+            logger.info("  → Полная обработка: сканирование, статистика, фото и истории")
+        elif work_mode == "stats_only":
+            logger.info("  → Только статистика: сканирование и сохранение в Excel, без медиа")
+        elif work_mode == "photos_only":
+            logger.info("  → Только фотографии: минимальное сканирование личных чатов, скачивание фото профиля")
         
         logger.info("Конфигурация успешно загружена")
         logger.debug(f"API ID: {api_id_int}, Phone: {phone}")
@@ -582,82 +624,138 @@ async def main() -> None:
             stories_long_timeout=float(stories_long_timeout),
         )
         
-        # Выполняем сканирование
-        logger.info("Начало процесса сканирования")
-        channels_data = await scanner.scan_all_channels()
-        logger.info("Сканирование каналов завершено, старт сканирования личных чатов")
-        private_chats_data = await scanner.scan_private_chats()
-        logger.info(f"Сканирование личных чатов завершено: {len(private_chats_data)}")
+        # Инициализируем переменные для результатов
+        channels_data = []
+        private_chats_data = []
+        photos_stats = {}
+        stories_stats = {}
+        output_file = None
+        output_filename = None
         
-        # Скачиваем фотографии профиля
-        logger.info("Начало скачивания фотографий профиля")
-        photos_stats = await scanner.download_profile_photos()
-        logger.info(
-            f"Скачивание фотографий завершено: найдено {photos_stats.get('total_photos', 0)}, "
-            f"скачано {photos_stats.get('downloaded_photos', 0)}, ошибок {photos_stats.get('failed_photos', 0)}"
-        )
-        
-        # Скачиваем истории
-        logger.info("Начало скачивания историй")
-        stories_stats = await scanner.download_stories()
-        logger.info(
-            f"Скачивание историй завершено: найдено {stories_stats.get('total_stories', 0)}, "
-            f"скачано {stories_stats.get('downloaded', 0)}, ошибок {stories_stats.get('failed', 0)}"
-        )
-        
-        # Сохраняем результаты
-        logger.info("Сохранение результатов сканирования")
-        output_file = scanner.save_to_xlsx("channels_data.xlsx")
-        output_filename = output_file.split("/")[-1] if "/" in output_file else output_file.split("\\")[-1]
-        
-        # Выводим статистику
-        logger.info("=" * 80)
-        logger.info("СКАНИРОВАНИЕ ЗАВЕРШЕНО")
-        logger.info("=" * 80)
-        logger.info(f"Всего найдено каналов и групп: {len(channels_data)}")
-        
-        # Подсчитываем статистику по каналам
-        channels_count = sum(1 for ch in channels_data if ch['is_broadcast'])
-        groups_count = sum(1 for ch in channels_data if not ch['is_broadcast'])
-        public_count = sum(1 for ch in channels_data if ch['is_public'])
-        private_count = len(channels_data) - public_count
-        
-        logger.info(f"  - Каналов: {channels_count}")
-        logger.info(f"  - Групп: {groups_count}")
-        logger.info(f"  - Публичных: {public_count}")
-        logger.info(f"  - Приватных: {private_count}")
-        
-        # Подсчитываем статистику по личным чатам
-        logger.info("=" * 80)
-        logger.info(f"Всего найдено личных чатов: {len(private_chats_data)}")
-        
-        if private_chats_data:
-            # Статистика по личным чатам
-            total_messages = sum(chat.get("messages_total", 0) or 0 for chat in private_chats_data)
-            total_messages_365 = sum(chat.get("messages_365", 0) or 0 for chat in private_chats_data)
-            total_messages_30 = sum(chat.get("messages_30", 0) or 0 for chat in private_chats_data)
-            total_messages_from_me = sum(chat.get("messages_from_me", 0) or 0 for chat in private_chats_data)
-            total_messages_from_other = sum(chat.get("messages_from_other", 0) or 0 for chat in private_chats_data)
+        # Выполняем действия в зависимости от режима работы
+        if work_mode == "full":
+            # Полная обработка: сканирование каналов и чатов
+            logger.info("Начало процесса сканирования")
+            channels_data = await scanner.scan_all_channels()
+            logger.info("Сканирование каналов завершено, старт сканирования личных чатов")
+            private_chats_data = await scanner.scan_private_chats()
+            logger.info(f"Сканирование личных чатов завершено: {len(private_chats_data)}")
             
-            bots_count = sum(1 for chat in private_chats_data if chat.get("is_bot") == "Да")
-            verified_count = sum(1 for chat in private_chats_data if chat.get("is_verified") == "Да")
-            premium_count = sum(1 for chat in private_chats_data if chat.get("is_premium") == "Да")
-            deleted_count = sum(1 for chat in private_chats_data if chat.get("deleted_status") == "Да")
+            # Скачиваем фотографии профиля
+            logger.info("Начало скачивания фотографий профиля")
+            photos_stats = await scanner.download_profile_photos()
+            logger.info(
+                f"Скачивание фотографий завершено: найдено {photos_stats.get('total_photos', 0)}, "
+                f"скачано {photos_stats.get('downloaded_photos', 0)}, ошибок {photos_stats.get('failed_photos', 0)}"
+            )
             
-            logger.info(f"  - Всего сообщений: {total_messages:,}")
-            logger.info(f"  - Сообщений за последние 365 дней: {total_messages_365:,}")
-            logger.info(f"  - Сообщений за последние 30 дней: {total_messages_30:,}")
-            logger.info(f"  - Сообщений от вас: {total_messages_from_me:,}")
-            logger.info(f"  - Сообщений от собеседников: {total_messages_from_other:,}")
-            logger.info(f"  - Ботов: {bots_count}")
-            logger.info(f"  - Верифицированных: {verified_count}")
-            logger.info(f"  - Premium: {premium_count}")
-            if deleted_count > 0:
-                logger.info(f"  - Удалено чатов: {deleted_count}")
+            # Скачиваем истории
+            logger.info("Начало скачивания историй")
+            stories_stats = await scanner.download_stories()
+            logger.info(
+                f"Скачивание историй завершено: найдено {stories_stats.get('total_stories', 0)}, "
+                f"скачано {stories_stats.get('downloaded', 0)}, ошибок {stories_stats.get('failed', 0)}"
+            )
+            
+            # Сохраняем результаты
+            logger.info("Сохранение результатов сканирования")
+            output_file = scanner.save_to_xlsx("channels_data.xlsx")
+            output_filename = output_file.split("/")[-1] if "/" in output_file else output_file.split("\\")[-1]
+            
+        elif work_mode == "stats_only":
+            # Только статистика: сканирование каналов и чатов, сохранение в Excel
+            logger.info("Начало процесса сканирования (режим: только статистика)")
+            channels_data = await scanner.scan_all_channels()
+            logger.info("Сканирование каналов завершено, старт сканирования личных чатов")
+            private_chats_data = await scanner.scan_private_chats()
+            logger.info(f"Сканирование личных чатов завершено: {len(private_chats_data)}")
+            
+            # Сохраняем результаты
+            logger.info("Сохранение результатов сканирования")
+            output_file = scanner.save_to_xlsx("channels_data.xlsx")
+            output_filename = output_file.split("/")[-1] if "/" in output_file else output_file.split("\\")[-1]
+            
+        elif work_mode == "photos_only":
+            # Только фотографии: минимальное сканирование личных чатов для получения списка пользователей
+            logger.info("Начало процесса сканирования личных чатов (режим: только фотографии)")
+            logger.info("Сканирование каналов пропущено (режим: только фотографии)")
+            private_chats_data = await scanner.scan_private_chats()
+            logger.info(f"Сканирование личных чатов завершено: {len(private_chats_data)}")
+            
+            # Скачиваем только фотографии профиля
+            logger.info("Начало скачивания фотографий профиля")
+            photos_stats = await scanner.download_profile_photos()
+            logger.info(
+                f"Скачивание фотографий завершено: найдено {photos_stats.get('total_photos', 0)}, "
+                f"скачано {photos_stats.get('downloaded_photos', 0)}, ошибок {photos_stats.get('failed_photos', 0)}"
+            )
         
+        # Выводим статистику в зависимости от режима работы
         logger.info("=" * 80)
-        logger.info("Результаты сохранены в файлы:")
-        logger.info(f"  - {output_filename} (Excel формат)")
+        logger.info("ОБРАБОТКА ЗАВЕРШЕНА")
+        logger.info("=" * 80)
+        
+        if work_mode in ["full", "stats_only"]:
+            # Статистика по каналам (только для режимов с полным сканированием)
+            logger.info(f"Всего найдено каналов и групп: {len(channels_data)}")
+            
+            if channels_data:
+                # Подсчитываем статистику по каналам
+                channels_count = sum(1 for ch in channels_data if ch['is_broadcast'])
+                groups_count = sum(1 for ch in channels_data if not ch['is_broadcast'])
+                public_count = sum(1 for ch in channels_data if ch['is_public'])
+                private_count = len(channels_data) - public_count
+                
+                logger.info(f"  - Каналов: {channels_count}")
+                logger.info(f"  - Групп: {groups_count}")
+                logger.info(f"  - Публичных: {public_count}")
+                logger.info(f"  - Приватных: {private_count}")
+            
+            # Подсчитываем статистику по личным чатам
+            logger.info("=" * 80)
+            logger.info(f"Всего найдено личных чатов: {len(private_chats_data)}")
+            
+            if private_chats_data:
+                # Статистика по личным чатам
+                total_messages = sum(chat.get("messages_total", 0) or 0 for chat in private_chats_data)
+                total_messages_365 = sum(chat.get("messages_365", 0) or 0 for chat in private_chats_data)
+                total_messages_30 = sum(chat.get("messages_30", 0) or 0 for chat in private_chats_data)
+                total_messages_from_me = sum(chat.get("messages_from_me", 0) or 0 for chat in private_chats_data)
+                total_messages_from_other = sum(chat.get("messages_from_other", 0) or 0 for chat in private_chats_data)
+                
+                bots_count = sum(1 for chat in private_chats_data if chat.get("is_bot") == "Да")
+                verified_count = sum(1 for chat in private_chats_data if chat.get("is_verified") == "Да")
+                premium_count = sum(1 for chat in private_chats_data if chat.get("is_premium") == "Да")
+                deleted_count = sum(1 for chat in private_chats_data if chat.get("deleted_status") == "Да")
+                
+                logger.info(f"  - Всего сообщений: {total_messages:,}")
+                logger.info(f"  - Сообщений за последние 365 дней: {total_messages_365:,}")
+                logger.info(f"  - Сообщений за последние 30 дней: {total_messages_30:,}")
+                logger.info(f"  - Сообщений от вас: {total_messages_from_me:,}")
+                logger.info(f"  - Сообщений от собеседников: {total_messages_from_other:,}")
+                logger.info(f"  - Ботов: {bots_count}")
+                logger.info(f"  - Верифицированных: {verified_count}")
+                logger.info(f"  - Premium: {premium_count}")
+                if deleted_count > 0:
+                    logger.info(f"  - Удалено чатов: {deleted_count}")
+            
+            if output_filename:
+                logger.info("=" * 80)
+                logger.info("Результаты сохранены в файлы:")
+                logger.info(f"  - {output_filename} (Excel формат)")
+        
+        elif work_mode == "photos_only":
+            # Статистика только по фотографиям
+            logger.info(f"Всего обработано личных чатов: {len(private_chats_data)}")
+            if photos_stats:
+                logger.info("=" * 80)
+                logger.info("Статистика скачивания фотографий:")
+                logger.info(f"  - Всего фотографий найдено: {photos_stats.get('total_photos', 0)}")
+                logger.info(f"  - Успешно скачано: {photos_stats.get('downloaded_photos', 0)}")
+                logger.info(f"  - Ошибок при скачивании: {photos_stats.get('failed_photos', 0)}")
+                logger.info(f"  - Пользователей с фотографиями: {photos_stats.get('users_with_photos', 0)}")
+                logger.info(f"  - Пользователей без фотографий: {photos_stats.get('users_without_photos', 0)}")
+        
         logger.info("=" * 80)
         
         # Закрываем клиент
