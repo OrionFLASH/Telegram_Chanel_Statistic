@@ -2181,17 +2181,47 @@ class ChannelScanner:
                         timeout_value = self.stories_timeout
                     
                     # Получаем истории пользователя через GetPeerStoriesRequest
-                    try:
-                        peer_stories = await asyncio.wait_for(
-                            self.client(functions.stories.GetPeerStoriesRequest(
-                                peer=entity
-                            )),
-                            timeout=timeout_value
-                        )
-                    except Exception as e:
-                        # Если нет доступа к историям или их нет
+                    peer_stories = None
+                    max_retries = 3
+                    retry_count = 0
+                    
+                    while retry_count < max_retries:
+                        try:
+                            peer_stories = await asyncio.wait_for(
+                                self.client(functions.stories.GetPeerStoriesRequest(
+                                    peer=entity
+                                )),
+                                timeout=timeout_value
+                            )
+                            break  # Успешно получили истории, выходим из цикла
+                        except FloodWaitError as e:
+                            # Обрабатываем FloodWaitError - ждем нужное время и повторяем
+                            wait_time = e.seconds
+                            self.logger.debug(
+                                f"FloodWaitError для {display_name} ({user_id}): ожидание {wait_time} секунд "
+                                f"[class: ChannelScanner | def: download_stories]"
+                            )
+                            await asyncio.sleep(wait_time)
+                            retry_count += 1
+                            continue
+                        except asyncio.TimeoutError:
+                            self.logger.debug(
+                                f"Таймаут при получении историй для {display_name} ({user_id}) "
+                                f"[class: ChannelScanner | def: download_stories]"
+                            )
+                            return user_stats
+                        except Exception as e:
+                            # Если нет доступа к историям или их нет
+                            self.logger.debug(
+                                f"Не удалось получить истории для {display_name} ({user_id}): {e} "
+                                f"[class: ChannelScanner | def: download_stories]"
+                            )
+                            return user_stats
+                    
+                    if peer_stories is None:
+                        # Не удалось получить истории после всех попыток
                         self.logger.debug(
-                            f"Не удалось получить истории для {display_name} ({user_id}): {e} "
+                            f"Не удалось получить истории для {display_name} ({user_id}) после {max_retries} попыток "
                             f"[class: ChannelScanner | def: download_stories]"
                         )
                         return user_stats
@@ -2233,11 +2263,31 @@ class ChannelScanner:
                             filename_base = f"{safe_name} ({safe_username}) [{user_id}]_{story_index}"
                             file_path = stories_dir / f"{filename_base}{file_ext}"
                             
-                            # Скачиваем медиа истории с таймаутом
-                            downloaded_path = await asyncio.wait_for(
-                                self.client.download_media(story.media, file=str(file_path)),
-                                timeout=timeout_value
-                            )
+                            # Скачиваем медиа истории с таймаутом и обработкой FloodWaitError
+                            downloaded_path = None
+                            download_retries = 3
+                            download_retry_count = 0
+                            
+                            while download_retry_count < download_retries:
+                                try:
+                                    downloaded_path = await asyncio.wait_for(
+                                        self.client.download_media(story.media, file=str(file_path)),
+                                        timeout=timeout_value
+                                    )
+                                    break  # Успешно скачали, выходим из цикла
+                                except FloodWaitError as e:
+                                    wait_time = e.seconds
+                                    self.logger.debug(
+                                        f"FloodWaitError при скачивании истории {story_index} для {display_name} ({user_id}): "
+                                        f"ожидание {wait_time} секунд [class: ChannelScanner | def: download_stories]"
+                                    )
+                                    await asyncio.sleep(wait_time)
+                                    download_retry_count += 1
+                                    continue
+                                except asyncio.TimeoutError:
+                                    raise  # Пробрасываем TimeoutError дальше
+                                except Exception as e:
+                                    raise  # Пробрасываем другие исключения дальше
                             
                             # Получаем реальное имя файла после скачивания
                             if downloaded_path:
