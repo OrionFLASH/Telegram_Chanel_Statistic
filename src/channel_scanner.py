@@ -491,19 +491,19 @@ class ChannelScanner:
                 # Дополнительная попытка через подсчет участников (только для групп)
                 if not entity.broadcast:
                     try:
-                            count = 0
+                        count = 0
                         async for _ in self.client.iter_participants(entity, limit=10000):
-                                count += 1
-                                if count >= 10000:  # Ограничение для производительности
-                                    break
+                            count += 1
+                            if count >= 10000:  # Ограничение для производительности
+                                break
                         if count > 0:
                             participants_count = count if count < 10000 else ">10000"
-            except ChatAdminRequiredError:
+                    except ChatAdminRequiredError:
                         self.logger.debug(
                             f"Требуются права администратора для подсчета участников через iter_participants для {entity.id} "
                             f"[class: ChannelScanner | def: get_channel_info]"
                         )
-            except Exception as e:
+                    except Exception as e:
                         self.logger.debug(
                             f"Не удалось получить количество участников через iter_participants для {entity.id}: {e} "
                             f"[class: ChannelScanner | def: get_channel_info]"
