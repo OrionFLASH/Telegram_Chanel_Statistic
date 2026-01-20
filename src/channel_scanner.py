@@ -372,6 +372,99 @@ class ChannelScanner:
         except Exception as e:
             self.logger.error(f"Ошибка при попытке отписки от {entity.id}: {e}")
             return False
+    
+    async def unsubscribe_only_channels(self) -> Dict[str, Any]:
+        """
+        Выполняет отписку только от каналов из списка unsubscribe_ids.
+        Не выполняет полное сканирование, только отписку.
+        
+        Returns:
+            Словарь со статистикой отписки
+        """
+        self.logger.info("Начало отписки от каналов (режим: только очистка)")
+        
+        if not self.unsubscribe_ids:
+            self.logger.warning("Список unsubscribe_ids пуст, отписка не будет выполнена")
+            return {
+                "total": 0,
+                "unsubscribed": 0,
+                "failed": 0,
+                "not_found": 0,
+            }
+        
+        # Статистика
+        total = len(self.unsubscribe_ids)
+        unsubscribed = 0
+        failed = 0
+        not_found = 0
+        
+        try:
+            # Получаем все диалоги (чаты, каналы, группы)
+            self.logger.debug("Получение списка всех диалогов для поиска каналов из списка отписки")
+            dialogs = await self.client.get_dialogs()
+            
+            # Создаем словарь для быстрого поиска: id -> entity
+            channels_map = {}
+            for dialog in dialogs:
+                entity = dialog.entity
+                if isinstance(entity, (Channel, Chat)):
+                    channels_map[entity.id] = entity
+            
+            self.logger.info(f"Найдено каналов/групп в диалогах: {len(channels_map)}")
+            self.logger.info(f"Каналов для отписки в списке: {total}")
+            
+            # Обрабатываем каждый ID из списка отписки
+            for channel_id in self.unsubscribe_ids:
+                if channel_id not in channels_map:
+                    not_found += 1
+                    self.logger.warning(
+                        f"Канал с ID {channel_id} не найден в списке диалогов (возможно, уже отписан или недоступен)"
+                    )
+                    continue
+                
+                entity = channels_map[channel_id]
+                channel_title = getattr(entity, "title", "Без названия") or "Без названия"
+                
+                self.logger.info(f"Отписка от канала: {channel_title} (ID: {channel_id})")
+                
+                try:
+                    is_unsubscribed = await self._leave_channel_or_chat(entity)
+                    if is_unsubscribed:
+                        unsubscribed += 1
+                        self.logger.info(f"Успешно отписан от канала: {channel_title} (ID: {channel_id})")
+                    else:
+                        failed += 1
+                        self.logger.error(f"Ошибка при отписке от канала: {channel_title} (ID: {channel_id})")
+                except Exception as e:
+                    failed += 1
+                    self.logger.error(
+                        f"Исключение при отписке от канала {channel_title} (ID: {channel_id}): {e} "
+                        f"[class: ChannelScanner | def: unsubscribe_only_channels]"
+                    )
+                
+                # Небольшая задержка между отписками для предотвращения FloodWaitError
+                await asyncio.sleep(0.5)
+        
+        except Exception as e:
+            self.logger.error(
+                f"Критическая ошибка при выполнении отписки: {e} "
+                f"[class: ChannelScanner | def: unsubscribe_only_channels]"
+            )
+        
+        self.logger.info("=" * 80)
+        self.logger.info("ОТПИСКА ОТ КАНАЛОВ ЗАВЕРШЕНА")
+        self.logger.info("=" * 80)
+        self.logger.info(f"Всего каналов в списке: {total}")
+        self.logger.info(f"Успешно отписано: {unsubscribed}")
+        self.logger.info(f"Ошибок при отписке: {failed}")
+        self.logger.info(f"Не найдено в диалогах: {not_found}")
+        
+        return {
+            "total": total,
+            "unsubscribed": unsubscribed,
+            "failed": failed,
+            "not_found": not_found,
+        }
 
     async def _delete_private_chat(self, entity: User, expected_id: int) -> bool:
         """
@@ -2138,6 +2231,41 @@ class ChannelScanner:
         
         self.logger.info(f"Найдено пользователей для скачивания историй: {len(private_users)}")
         
+        # Пробуем получить все истории сразу через GetAllStoriesRequest для ускорения
+        # Это даст нам все истории всех пользователей за один запрос
+        all_stories_cache = {}  # Кэш: user_id -> список историй
+        try:
+            self.logger.info("Получение всех историй через GetAllStoriesRequest...")
+            all_stories_response = await asyncio.wait_for(
+                self.client(functions.stories.GetAllStoriesRequest(
+                    next=True  # Получаем все истории, включая архивные
+                )),
+                timeout=300.0  # Большой таймаут для получения всех историй
+            )
+            # Кэшируем истории по user_id
+            if all_stories_response and hasattr(all_stories_response, "peer_stories"):
+                for peer_story in all_stories_response.peer_stories:
+                    if hasattr(peer_story, "peer") and hasattr(peer_story.peer, "user_id"):
+                        user_id = peer_story.peer.user_id
+                        if hasattr(peer_story, "stories") and hasattr(peer_story.stories, "stories"):
+                            all_stories_cache[user_id] = peer_story.stories.stories
+                            self.logger.debug(
+                                f"Кэшировано {len(peer_story.stories.stories)} историй для user_id={user_id} "
+                                f"[class: ChannelScanner | def: download_stories]"
+                            )
+            self.logger.info(f"Получено историй для {len(all_stories_cache)} пользователей из GetAllStoriesRequest")
+        except FloodWaitError as e:
+            self.logger.warning(
+                f"FloodWaitError при получении всех историй: ожидание {e.seconds} секунд, "
+                f"будем получать истории по отдельности [class: ChannelScanner | def: download_stories]"
+            )
+            await asyncio.sleep(e.seconds)
+        except Exception as e:
+            self.logger.debug(
+                f"Не удалось получить все истории через GetAllStoriesRequest: {e}, "
+                f"будем получать истории по отдельности [class: ChannelScanner | def: download_stories]"
+            )
+        
         # Статистика
         total_stories = 0
         downloaded_stories = 0
@@ -2145,8 +2273,11 @@ class ChannelScanner:
         users_with_stories = 0
         users_without_stories = 0
         
-        # Семафор для контроля параллелизма
-        semaphore = asyncio.Semaphore(self.concurrency)
+        # Семафор для контроля параллелизма - увеличиваем для ускорения скачивания историй
+        # Используем больший параллелизм, так как скачивание историй менее нагружает API
+        stories_concurrency = min(self.concurrency * 2, 32)  # Увеличиваем до 2x, но не более 32
+        semaphore = asyncio.Semaphore(stories_concurrency)
+        self.logger.info(f"Параллелизм для скачивания историй: {stories_concurrency}")
         
         async def download_user_stories(index: int, entity: User) -> Dict[str, Any]:
             """Скачивает истории для одного пользователя."""
@@ -2181,9 +2312,11 @@ class ChannelScanner:
                         timeout_value = self.stories_timeout
                     
                     # Получаем истории пользователя через GetPeerStoriesRequest
+                    # Сначала пробуем получить активные истории
                     peer_stories = None
                     max_retries = 3
                     retry_count = 0
+                    stories_list = []
                     
                     while retry_count < max_retries:
                         try:
@@ -2226,13 +2359,26 @@ class ChannelScanner:
                         )
                         return user_stats
                     
-                    if not peer_stories or not hasattr(peer_stories, "stories") or not peer_stories.stories:
-                        self.logger.debug(f"Нет историй для {display_name} ({user_id})")
-                        return user_stats
+                    # Извлекаем список историй из ответа
+                    if peer_stories and hasattr(peer_stories, "stories") and peer_stories.stories:
+                        stories_list = peer_stories.stories.stories if hasattr(peer_stories.stories, "stories") else []
                     
-                    stories_list = peer_stories.stories.stories if hasattr(peer_stories.stories, "stories") else []
+                    # Объединяем с историями из кэша GetAllStoriesRequest (если есть)
+                    # Это даст нам больше историй, включая архивные
+                    if user_id in all_stories_cache:
+                        cached_stories = all_stories_cache[user_id]
+                        # Добавляем истории из кэша, которых нет в активных
+                        existing_ids = {s.id for s in stories_list if hasattr(s, "id")}
+                        for story in cached_stories:
+                            if hasattr(story, "id") and story.id not in existing_ids:
+                                stories_list.append(story)
+                                self.logger.debug(
+                                    f"Добавлена история из кэша {story.id} для {display_name} ({user_id}) "
+                                    f"[class: ChannelScanner | def: download_stories]"
+                                )
+                    
                     if not stories_list:
-                        self.logger.debug(f"Нет активных историй для {display_name} ({user_id})")
+                        self.logger.debug(f"Нет историй (активных и архивных) для {display_name} ({user_id})")
                         return user_stats
                     
                     user_stats["total_stories"] = len(stories_list)

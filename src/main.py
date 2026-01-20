@@ -453,6 +453,7 @@ def load_work_mode(default_value: str = "full") -> str:
     - "stats_only" - только статистика (сканирование каналов и чатов, сохранение в Excel, без скачивания медиа)
     - "photos_only" - только фотографии (минимальное сканирование личных чатов для получения списка пользователей, скачивание фотографий профиля)
     - "stories_only" - только истории (минимальное сканирование личных чатов для получения списка пользователей, скачивание историй)
+    - "unsubscribe_only" - только очистка (отписка от каналов из списка TELEGRAM_UNSUBSCRIBE_IDS, без сканирования и сохранения)
     
     Args:
         default_value: Значение по умолчанию
@@ -465,7 +466,7 @@ def load_work_mode(default_value: str = "full") -> str:
     if not mode_raw:
         return default_value
     
-    valid_modes = ["full", "stats_only", "photos_only", "stories_only"]
+    valid_modes = ["full", "stats_only", "photos_only", "stories_only", "unsubscribe_only"]
     if mode_raw not in valid_modes:
         logger.warning(
             f"Некорректное значение TELEGRAM_WORK_MODE '{mode_raw}', "
@@ -548,6 +549,8 @@ async def main() -> None:
             logger.info("  → Только фотографии: минимальное сканирование личных чатов, скачивание фото профиля")
         elif work_mode == "stories_only":
             logger.info("  → Только истории: минимальное сканирование личных чатов, скачивание историй")
+        elif work_mode == "unsubscribe_only":
+            logger.info("  → Только очистка: отписка от каналов из списка TELEGRAM_UNSUBSCRIBE_IDS")
         
         logger.info("Конфигурация успешно загружена")
         logger.debug(f"API ID: {api_id_int}, Phone: {phone}")
@@ -694,19 +697,33 @@ async def main() -> None:
             )
         
         elif work_mode == "stories_only":
-            # Только истории: минимальное сканирование личных чатов для получения списка пользователей
-            logger.info("Начало процесса сканирования личных чатов (режим: только истории)")
+            # Только истории: получаем список пользователей напрямую из get_dialogs() без полного сканирования
+            logger.info("Режим: только истории - пропускаем полное сканирование")
             logger.info("Сканирование каналов пропущено (режим: только истории)")
-            private_chats_data = await scanner.scan_private_chats()
-            logger.info(f"Сканирование личных чатов завершено: {len(private_chats_data)}")
+            logger.info("Получение списка пользователей для скачивания историй...")
             
-            # Скачиваем только истории
+            # Скачиваем только истории (список пользователей получается внутри download_stories)
             logger.info("Начало скачивания историй")
             stories_stats = await scanner.download_stories()
             logger.info(
                 f"Скачивание историй завершено: найдено {stories_stats.get('total_stories', 0)}, "
                 f"скачано {stories_stats.get('downloaded', 0)}, ошибок {stories_stats.get('failed', 0)}"
             )
+        
+        elif work_mode == "unsubscribe_only":
+            # Только очистка: отписка от каналов из списка TELEGRAM_UNSUBSCRIBE_IDS
+            if not unsubscribe_ids:
+                logger.warning("Режим 'unsubscribe_only' выбран, но список TELEGRAM_UNSUBSCRIBE_IDS пуст")
+                logger.info("Очистка не будет выполнена")
+            else:
+                logger.info(f"Начало отписки от каналов (ID в списке: {len(unsubscribe_ids)})")
+                unsubscribe_stats = await scanner.unsubscribe_only_channels()
+                logger.info(
+                    f"Отписка завершена: обработано {unsubscribe_stats.get('total', 0)}, "
+                    f"успешно отписано {unsubscribe_stats.get('unsubscribed', 0)}, "
+                    f"ошибок {unsubscribe_stats.get('failed', 0)}, "
+                    f"не найдено {unsubscribe_stats.get('not_found', 0)}"
+                )
         
         # Выводим статистику в зависимости от режима работы
         logger.info("=" * 80)
