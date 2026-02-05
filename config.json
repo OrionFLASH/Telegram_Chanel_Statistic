@@ -1,0 +1,28 @@
+{
+  "scan": {
+    "concurrency": 32,
+    "request_timeout_sec": 250,
+    "channel_timeout_sec": 200
+  },
+  "private_chats": {
+    "private_timeout_sec": 2000,
+    "private_timeout_ids": [644264893, 669556557, 1876697589, 5456838378, 1814164067, 1444214702, 1292636258, 3194912, 140072900, 88558850, 28319474, 1614687014, 282903350, 1033649249, 627046553],
+    "private_text_timeout_sec": 3000,
+    "private_text_timeout_ids": [],
+    "delete_private_chat_ids": [1032900147, 938268774]
+  },
+  "photos": {
+    "photos_timeout_sec": 100,
+    "photos_long_timeout_sec": 300,
+    "photos_timeout_ids": []
+  },
+  "stories": {
+    "stories_timeout_sec": 100,
+    "stories_long_timeout_sec": 300,
+    "stories_timeout_ids": []
+  },
+  "unsubscribe": {
+    "unsubscribe_ids": [1523806039, 1773402059, 2068343941, 1078695401, 2237736753]
+  },
+  "work_mode": "full"
+}

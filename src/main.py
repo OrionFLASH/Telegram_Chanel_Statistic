@@ -3,479 +3,19 @@
 
 Программа сканирует все каналы, группы и супергруппы, в которых
 пользователь является участником, и сохраняет информацию о них.
+
+Учётные данные (API ID, API Hash, телефон) загружаются из .env.
+Остальные настройки — из config.json.
 """
 
 import asyncio
-import os
 import sys
-from pathlib import Path
-from typing import Optional, Tuple
-from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 
 from logger_config import setup_logger
 from channel_scanner import ChannelScanner
-
-
-def load_config() -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """
-    Загружает конфигурацию из файла .env.
-    
-    Returns:
-        Кортеж с API_ID, API_HASH и PHONE из конфигурации
-    """
-    # Загружаем переменные окружения из .env файла
-    env_path = Path(__file__).parent.parent / '.env'
-    load_dotenv(env_path)
-    
-    api_id = os.getenv('TELEGRAM_API_ID')
-    api_hash = os.getenv('TELEGRAM_API_HASH')
-    phone = os.getenv('TELEGRAM_PHONE')
-    
-    return api_id, api_hash, phone
-
-
-def load_scan_concurrency(default_value: int = 32) -> int:
-    """
-    Загружает параметр параллелизма сканирования из переменных окружения.
-    
-    Args:
-        default_value: Значение по умолчанию, если переменная не задана
-    
-    Returns:
-        Количество одновременных задач для сканирования
-    """
-    logger = setup_logger("main")
-    concurrency_raw = os.getenv("TELEGRAM_CONCURRENCY", "").strip()
-    if not concurrency_raw:
-        return default_value
-    try:
-        concurrency_value = int(concurrency_raw)
-        if concurrency_value <= 0:
-            raise ValueError("Параллелизм должен быть положительным числом")
-        return concurrency_value
-    except ValueError as exc:
-        logger.warning(
-            f"Некорректное значение TELEGRAM_CONCURRENCY '{concurrency_raw}', "
-            f"используется значение по умолчанию {default_value}"
-        )
-        logger.debug(f"Детали ошибки при разборе TELEGRAM_CONCURRENCY: {exc}")
-        return default_value
-
-
-def load_request_timeout(default_value: int = 60) -> int:
-    """
-    Загружает таймаут запросов из переменных окружения.
-    
-    Args:
-        default_value: Значение по умолчанию в секундах
-    
-    Returns:
-        Таймаут запросов в секундах
-    """
-    logger = setup_logger("main")
-    timeout_raw = os.getenv("TELEGRAM_REQUEST_TIMEOUT", "").strip()
-    if not timeout_raw:
-        return default_value
-    try:
-        timeout_value = int(timeout_raw)
-        if timeout_value <= 0:
-            raise ValueError("Таймаут должен быть положительным числом")
-        return timeout_value
-    except ValueError as exc:
-        logger.warning(
-            f"Некорректное значение TELEGRAM_REQUEST_TIMEOUT '{timeout_raw}', "
-            f"используется значение по умолчанию {default_value}"
-        )
-        logger.debug(f"Детали ошибки при разборе TELEGRAM_REQUEST_TIMEOUT: {exc}")
-        return default_value
-
-
-def load_unsubscribe_ids() -> set:
-    """
-    Загружает список ID каналов/групп для авто-отписки из .env.
-    
-    Returns:
-        Набор ID каналов/групп для отписки
-    """
-    logger = setup_logger("main")
-    raw_value = os.getenv("TELEGRAM_UNSUBSCRIBE_IDS", "").strip()
-    if not raw_value:
-        return set()
-    ids: set = set()
-    for item in raw_value.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        try:
-            ids.add(int(item))
-        except ValueError as exc:
-            logger.warning(
-                f"Некорректный ID в TELEGRAM_UNSUBSCRIBE_IDS: '{item}', пропуск"
-            )
-            logger.debug(f"Детали ошибки разбора ID: {exc}")
-    return ids
-
-
-def load_private_timeout_ids() -> set:
-    """
-    Загружает список ID личных чатов для отдельного таймаута из .env.
-    
-    Returns:
-        Набор ID личных чатов
-    """
-    logger = setup_logger("main")
-    raw_value = os.getenv("TELEGRAM_PRIVATE_TIMEOUT_IDS", "").strip()
-    if not raw_value:
-        return set()
-    ids: set = set()
-    for item in raw_value.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        try:
-            ids.add(int(item))
-        except ValueError as exc:
-            logger.warning(
-                f"Некорректный ID в TELEGRAM_PRIVATE_TIMEOUT_IDS: '{item}', пропуск"
-            )
-            logger.debug(f"Детали ошибки разбора ID: {exc}")
-    return ids
-
-
-def load_channel_timeout(default_value: float = 100.0) -> float:
-    """
-    Загружает таймаут обработки каналов/групп из переменных окружения.
-    
-    Args:
-        default_value: Значение по умолчанию в секундах
-    
-    Returns:
-        Таймаут обработки каналов в секундах
-    """
-    logger = setup_logger("main")
-    timeout_raw = os.getenv("TELEGRAM_CHANNEL_TIMEOUT", "").strip()
-    if not timeout_raw:
-        return default_value
-    try:
-        timeout_value = float(timeout_raw)
-        if timeout_value <= 0:
-            raise ValueError("Таймаут должен быть положительным числом")
-        return timeout_value
-    except ValueError as exc:
-        logger.warning(
-            f"Некорректное значение TELEGRAM_CHANNEL_TIMEOUT '{timeout_raw}', "
-            f"используется значение по умолчанию {default_value}"
-        )
-        logger.debug(f"Детали ошибки при разборе TELEGRAM_CHANNEL_TIMEOUT: {exc}")
-        return default_value
-
-
-def load_private_timeout_value(default_value: int = 600) -> int:
-    """
-    Загружает отдельный таймаут для личных чатов из переменных окружения.
-    
-    Args:
-        default_value: Значение по умолчанию в секундах
-    
-    Returns:
-        Таймаут запросов для личных чатов в секундах
-    """
-    logger = setup_logger("main")
-    timeout_raw = os.getenv("TELEGRAM_PRIVATE_TIMEOUT", "").strip()
-    if not timeout_raw:
-        return default_value
-    try:
-        timeout_value = int(timeout_raw)
-        if timeout_value <= 0:
-            raise ValueError("Таймаут должен быть положительным числом")
-        return timeout_value
-    except ValueError as exc:
-        logger.warning(
-            f"Некорректное значение TELEGRAM_PRIVATE_TIMEOUT '{timeout_raw}', "
-            f"используется значение по умолчанию {default_value}"
-        )
-        logger.debug(f"Детали ошибки при разборе TELEGRAM_PRIVATE_TIMEOUT: {exc}")
-        return default_value
-
-
-def load_private_text_timeout_ids() -> set:
-    """
-    Загружает список ID личных чатов для расширенной статистики текста из .env.
-    
-    Returns:
-        Набор ID личных чатов
-    """
-    logger = setup_logger("main")
-    raw_value = os.getenv("TELEGRAM_PRIVATE_TEXT_TIMEOUT_IDS", "").strip()
-    if not raw_value:
-        return set()
-    ids: set = set()
-    for item in raw_value.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        try:
-            ids.add(int(item))
-        except ValueError as exc:
-            logger.warning(
-                f"Некорректный ID в TELEGRAM_PRIVATE_TEXT_TIMEOUT_IDS: '{item}', пропуск"
-            )
-            logger.debug(f"Детали ошибки разбора ID: {exc}")
-    return ids
-
-
-def load_delete_private_chat_ids() -> set:
-    """
-    Загружает список ID личных чатов для удаления из .env.
-    
-    Returns:
-        Набор ID личных чатов для удаления
-    """
-    logger = setup_logger("main")
-    raw_value = os.getenv("TELEGRAM_DELETE_PRIVATE_CHAT_IDS", "").strip()
-    if not raw_value:
-        return set()
-    ids: set = set()
-    for item in raw_value.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        try:
-            ids.add(int(item))
-        except ValueError as exc:
-            logger.warning(
-                f"Некорректный ID в TELEGRAM_DELETE_PRIVATE_CHAT_IDS: '{item}', пропуск"
-            )
-            logger.debug(f"Детали ошибки разбора ID: {exc}")
-    return ids
-
-
-def load_private_text_timeout_value(default_value: int = 2000) -> int:
-    """
-    Загружает отдельный таймаут для расширенной статистики текста.
-    
-    Args:
-        default_value: Значение по умолчанию в секундах
-    
-    Returns:
-        Таймаут запросов для личных чатов в секундах
-    """
-    logger = setup_logger("main")
-    timeout_raw = os.getenv("TELEGRAM_PRIVATE_TEXT_TIMEOUT", "").strip()
-    if not timeout_raw:
-        return default_value
-    try:
-        timeout_value = int(timeout_raw)
-        if timeout_value <= 0:
-            raise ValueError("Таймаут должен быть положительным числом")
-        return timeout_value
-    except ValueError as exc:
-        logger.warning(
-            f"Некорректное значение TELEGRAM_PRIVATE_TEXT_TIMEOUT '{timeout_raw}', "
-            f"используется значение по умолчанию {default_value}"
-        )
-        logger.debug(f"Детали ошибки при разборе TELEGRAM_PRIVATE_TEXT_TIMEOUT: {exc}")
-        return default_value
-
-
-def load_photos_timeout_value(default_value: float = 100.0) -> float:
-    """
-    Загружает таймаут для скачивания фотографий профиля.
-    
-    Args:
-        default_value: Значение по умолчанию в секундах
-    
-    Returns:
-        Таймаут для скачивания фотографий в секундах
-    """
-    logger = setup_logger("main")
-    timeout_raw = os.getenv("TELEGRAM_PHOTOS_TIMEOUT", "").strip()
-    if not timeout_raw:
-        return default_value
-    try:
-        timeout_value = float(timeout_raw)
-        if timeout_value <= 0:
-            raise ValueError("Таймаут должен быть положительным числом")
-        return timeout_value
-    except ValueError as exc:
-        logger.warning(
-            f"Некорректное значение TELEGRAM_PHOTOS_TIMEOUT '{timeout_raw}', "
-            f"используется значение по умолчанию {default_value}"
-        )
-        logger.debug(f"Детали ошибки при разборе TELEGRAM_PHOTOS_TIMEOUT: {exc}")
-        return default_value
-
-
-def load_photos_timeout_ids() -> set:
-    """
-    Загружает список ID личных чатов для отдельного таймаута при скачивании фотографий из .env.
-    
-    Returns:
-        Набор ID личных чатов
-    """
-    logger = setup_logger("main")
-    raw_value = os.getenv("TELEGRAM_PHOTOS_TIMEOUT_IDS", "").strip()
-    if not raw_value:
-        return set()
-    ids: set = set()
-    for item in raw_value.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        try:
-            ids.add(int(item))
-        except ValueError as exc:
-            logger.warning(
-                f"Некорректный ID в TELEGRAM_PHOTOS_TIMEOUT_IDS: '{item}', пропуск"
-            )
-            logger.debug(f"Детали ошибки разбора ID: {exc}")
-    return ids
-
-
-def load_photos_long_timeout_value(default_value: float = 300.0) -> float:
-    """
-    Загружает большой таймаут для скачивания фотографий профиля (для пользователей с большим количеством фото).
-    
-    Args:
-        default_value: Значение по умолчанию в секундах
-    
-    Returns:
-        Большой таймаут для скачивания фотографий в секундах
-    """
-    logger = setup_logger("main")
-    timeout_raw = os.getenv("TELEGRAM_PHOTOS_LONG_TIMEOUT", "").strip()
-    if not timeout_raw:
-        return default_value
-    try:
-        timeout_value = float(timeout_raw)
-        if timeout_value <= 0:
-            raise ValueError("Таймаут должен быть положительным числом")
-        return timeout_value
-    except ValueError as exc:
-        logger.warning(
-            f"Некорректное значение TELEGRAM_PHOTOS_LONG_TIMEOUT '{timeout_raw}', "
-            f"используется значение по умолчанию {default_value}"
-        )
-        logger.debug(f"Детали ошибки при разборе TELEGRAM_PHOTOS_LONG_TIMEOUT: {exc}")
-        return default_value
-
-
-def load_stories_timeout_value(default_value: float = 100.0) -> float:
-    """
-    Загружает таймаут для скачивания историй (stories).
-    
-    Args:
-        default_value: Значение по умолчанию в секундах
-    
-    Returns:
-        Таймаут для скачивания историй в секундах
-    """
-    logger = setup_logger("main")
-    timeout_raw = os.getenv("TELEGRAM_STORIES_TIMEOUT", "").strip()
-    if not timeout_raw:
-        return default_value
-    try:
-        timeout_value = float(timeout_raw)
-        if timeout_value <= 0:
-            raise ValueError("Таймаут должен быть положительным числом")
-        return timeout_value
-    except ValueError as exc:
-        logger.warning(
-            f"Некорректное значение TELEGRAM_STORIES_TIMEOUT '{timeout_raw}', "
-            f"используется значение по умолчанию {default_value}"
-        )
-        logger.debug(f"Детали ошибки при разборе TELEGRAM_STORIES_TIMEOUT: {exc}")
-        return default_value
-
-
-def load_stories_timeout_ids() -> set:
-    """
-    Загружает список ID личных чатов для отдельного таймаута при скачивании историй из .env.
-    
-    Returns:
-        Набор ID личных чатов
-    """
-    logger = setup_logger("main")
-    raw_value = os.getenv("TELEGRAM_STORIES_TIMEOUT_IDS", "").strip()
-    if not raw_value:
-        return set()
-    ids: set = set()
-    for item in raw_value.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        try:
-            ids.add(int(item))
-        except ValueError as exc:
-            logger.warning(
-                f"Некорректный ID в TELEGRAM_STORIES_TIMEOUT_IDS: '{item}', пропуск"
-            )
-            logger.debug(f"Детали ошибки разбора ID: {exc}")
-    return ids
-
-
-def load_stories_long_timeout_value(default_value: float = 300.0) -> float:
-    """
-    Загружает большой таймаут для скачивания историй (для пользователей с большим количеством историй).
-    
-    Args:
-        default_value: Значение по умолчанию в секундах
-    
-    Returns:
-        Большой таймаут для скачивания историй в секундах
-    """
-    logger = setup_logger("main")
-    timeout_raw = os.getenv("TELEGRAM_STORIES_LONG_TIMEOUT", "").strip()
-    if not timeout_raw:
-        return default_value
-    try:
-        timeout_value = float(timeout_raw)
-        if timeout_value <= 0:
-            raise ValueError("Таймаут должен быть положительным числом")
-        return timeout_value
-    except ValueError as exc:
-        logger.warning(
-            f"Некорректное значение TELEGRAM_STORIES_LONG_TIMEOUT '{timeout_raw}', "
-            f"используется значение по умолчанию {default_value}"
-        )
-        logger.debug(f"Детали ошибки при разборе TELEGRAM_STORIES_LONG_TIMEOUT: {exc}")
-        return default_value
-
-
-def load_work_mode(default_value: str = "full") -> str:
-    """
-    Загружает режим работы программы из переменных окружения.
-    
-    Возможные значения:
-    - "full" - полная обработка (сканирование каналов и чатов, сохранение в Excel, скачивание фото и историй)
-    - "stats_only" - только статистика (сканирование каналов и чатов, сохранение в Excel, без скачивания медиа)
-    - "photos_only" - только фотографии (минимальное сканирование личных чатов для получения списка пользователей, скачивание фотографий профиля)
-    - "stories_only" - только истории (минимальное сканирование личных чатов для получения списка пользователей, скачивание историй)
-    - "unsubscribe_only" - только очистка (отписка от каналов из списка TELEGRAM_UNSUBSCRIBE_IDS, без сканирования и сохранения)
-    
-    Args:
-        default_value: Значение по умолчанию
-    
-    Returns:
-        Режим работы программы
-    """
-    logger = setup_logger("main")
-    mode_raw = os.getenv("TELEGRAM_WORK_MODE", "").strip().lower()
-    if not mode_raw:
-        return default_value
-    
-    valid_modes = ["full", "stats_only", "photos_only", "stories_only", "unsubscribe_only"]
-    if mode_raw not in valid_modes:
-        logger.warning(
-            f"Некорректное значение TELEGRAM_WORK_MODE '{mode_raw}', "
-            f"допустимые значения: {', '.join(valid_modes)}, "
-            f"используется значение по умолчанию '{default_value}'"
-        )
-        return default_value
-    
-    return mode_raw
+from config_loader import load_env_credentials, load_app_config
 
 
 async def authenticate_client(client: TelegramClient, phone: str) -> None:
@@ -521,25 +61,23 @@ async def main() -> None:
     logger.info("=" * 80)
     
     try:
-        # Загружаем конфигурацию
-        logger.info("Загрузка конфигурации из .env файла")
-        api_id, api_hash, phone = load_config()
-        
-        # Проверяем наличие всех необходимых параметров
+        # Учётные данные только из .env (файл в .gitignore)
+        logger.info("Загрузка учётных данных из .env")
+        api_id, api_hash, phone = load_env_credentials()
         if not api_id or not api_hash or not phone:
-            logger.error("Ошибка: не все параметры конфигурации заданы в .env файле")
+            logger.error("Ошибка: не все параметры заданы в .env")
             logger.error("Необходимо указать: TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_PHONE")
             sys.exit(1)
-        
-        # Преобразуем API_ID в число
         try:
             api_id_int = int(api_id)
         except ValueError:
             logger.error("Ошибка: TELEGRAM_API_ID должен быть числом")
             sys.exit(1)
-        
-        # Загружаем режим работы
-        work_mode = load_work_mode()
+
+        # Настройки работы из config.json
+        logger.info("Загрузка настроек из config.json")
+        cfg = load_app_config(logger)
+        work_mode = cfg["work_mode"]
         logger.info(f"Режим работы: {work_mode}")
         if work_mode == "full":
             logger.info("  → Полная обработка: сканирование, статистика, фото и истории")
@@ -563,23 +101,23 @@ async def main() -> None:
         # Выполняем аутентификацию
         await authenticate_client(client, phone)
         
-        # Создаем сканер каналов
+        # Создаем сканер каналов (параметры из config.json)
         logger.info("Инициализация сканера каналов")
-        concurrency = load_scan_concurrency()
-        request_timeout = load_request_timeout()
-        channel_timeout = load_channel_timeout()
-        private_timeout = load_private_timeout_value()
-        private_timeout_ids = load_private_timeout_ids()
-        private_text_timeout = load_private_text_timeout_value()
-        private_text_timeout_ids = load_private_text_timeout_ids()
-        delete_private_chat_ids = load_delete_private_chat_ids()
-        photos_timeout = load_photos_timeout_value()
-        photos_timeout_ids = load_photos_timeout_ids()
-        photos_long_timeout = load_photos_long_timeout_value()
-        stories_timeout = load_stories_timeout_value()
-        stories_timeout_ids = load_stories_timeout_ids()
-        stories_long_timeout = load_stories_long_timeout_value()
-        unsubscribe_ids = load_unsubscribe_ids()
+        concurrency = cfg["concurrency"]
+        request_timeout = cfg["request_timeout"]
+        channel_timeout = cfg["channel_timeout"]
+        private_timeout = cfg["private_timeout"]
+        private_timeout_ids = cfg["private_timeout_ids"]
+        private_text_timeout = cfg["private_text_timeout"]
+        private_text_timeout_ids = cfg["private_text_timeout_ids"]
+        delete_private_chat_ids = cfg["delete_private_chat_ids"]
+        photos_timeout = cfg["photos_timeout"]
+        photos_timeout_ids = cfg["photos_timeout_ids"]
+        photos_long_timeout = cfg["photos_long_timeout"]
+        stories_timeout = cfg["stories_timeout"]
+        stories_timeout_ids = cfg["stories_timeout_ids"]
+        stories_long_timeout = cfg["stories_long_timeout"]
+        unsubscribe_ids = cfg["unsubscribe_ids"]
         logger.info(f"Параллелизм сканирования: {concurrency}")
         logger.info(f"Таймаут запроса: {request_timeout} сек")
         logger.info(f"Таймаут обработки каналов: {channel_timeout} сек")
@@ -711,9 +249,9 @@ async def main() -> None:
             )
         
         elif work_mode == "unsubscribe_only":
-            # Только очистка: отписка от каналов из списка TELEGRAM_UNSUBSCRIBE_IDS
+            # Только очистка: отписка от каналов из списка config.json → unsubscribe.unsubscribe_ids
             if not unsubscribe_ids:
-                logger.warning("Режим 'unsubscribe_only' выбран, но список TELEGRAM_UNSUBSCRIBE_IDS пуст")
+                logger.warning("Режим 'unsubscribe_only' выбран, но список unsubscribe_ids в config.json пуст")
                 logger.info("Очистка не будет выполнена")
             else:
                 logger.info(f"Начало отписки от каналов (ID в списке: {len(unsubscribe_ids)})")
