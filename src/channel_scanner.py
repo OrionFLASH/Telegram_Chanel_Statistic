@@ -670,11 +670,15 @@ class ChannelScanner:
             else:
                 channel_data["last_message_date"] = await self._fetch_last_message_date(entity)
             
-            # Дополнительная информация
-            if hasattr(entity, 'about'):
-                channel_data["about"] = self._sanitize_text_for_excel(entity.about or "Нет описания")
-            else:
-                channel_data["about"] = "Нет описания"
+            # Описание канала/группы: в API приходит в full_chat (GetFullChannel/GetFullChat), не в базовом entity
+            about_text = None
+            if full_channel_info and hasattr(full_channel_info, "full_chat"):
+                about_text = getattr(full_channel_info.full_chat, "about", None)
+            elif full_chat_info and hasattr(full_chat_info, "full_chat"):
+                about_text = getattr(full_chat_info.full_chat, "about", None)
+            if not about_text and hasattr(entity, "about"):
+                about_text = entity.about
+            channel_data["about"] = self._sanitize_text_for_excel(about_text or "Нет описания")
             
             # Дата создания (если доступна)
             if hasattr(entity, 'date'):
